@@ -1,6 +1,6 @@
 """
 SEVEN-SERVER - database.py
-Minimal SQLite database for analytics
+Minimal SQLite database for analytics + update management
 """
 
 import sqlite3
@@ -11,11 +11,10 @@ DB_PATH = "seven_analytics.db"
 
 
 def init_db():
-    """Initialize database tables."""
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
 
-    # Users table
+    # ── Users ──
     c.execute("""
         CREATE TABLE IF NOT EXISTS users (
             device_id    TEXT PRIMARY KEY,
@@ -28,16 +27,12 @@ def init_db():
             license_tier TEXT DEFAULT 'free'
         )
     """)
-
-    # ── Migration: add name column if it doesn't exist yet ──
-    # Safe to run every time — does nothing if column already exists
     try:
         c.execute("ALTER TABLE users ADD COLUMN name TEXT")
-        print("[DB] Migration: added 'name' column to users")
     except sqlite3.OperationalError:
-        pass  # Column already exists — normal on fresh installs
+        pass
 
-    # Referrals table
+    # ── Referrals ──
     c.execute("""
         CREATE TABLE IF NOT EXISTS referrals (
             id                 INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -54,7 +49,7 @@ def init_db():
         )
     """)
 
-    # Licenses table
+    # ── Licenses ──
     c.execute("""
         CREATE TABLE IF NOT EXISTS licenses (
             license_key TEXT PRIMARY KEY,
@@ -67,6 +62,25 @@ def init_db():
         )
     """)
 
+    # ── Updates (NEW) ──
+    # One row per release you publish
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS updates (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            version         TEXT UNIQUE NOT NULL,
+            download_url    TEXT NOT NULL,
+            size_mb         REAL DEFAULT 0,
+            changelog       TEXT DEFAULT '[]',
+            target_tier     TEXT DEFAULT 'pro',
+            is_critical     INTEGER DEFAULT 0,
+            download_mode   TEXT DEFAULT 'manual',
+            auto_deliver    INTEGER DEFAULT 1,
+            is_active       INTEGER DEFAULT 1,
+            published_at    TEXT,
+            created_at      TEXT
+        )
+    """)
+
     conn.commit()
     conn.close()
     print("[DB] Initialized")
@@ -76,14 +90,9 @@ def get_db():
     return sqlite3.connect(DB_PATH)
 
 
-def register_user(
-    device_id: str,
-    email: str = None,
-    name: str = None,
-    country: str = None,
-    referral_code: str = None,
-):
-    """Register or update user. Upserts on device_id."""
+# ── Users ──
+
+def register_user(device_id, email=None, name=None, country=None, referral_code=None):
     conn = get_db()
     c = conn.cursor()
     now = datetime.now().isoformat()
@@ -92,16 +101,13 @@ def register_user(
         INSERT INTO users (device_id, name, email, country, install_date, last_seen)
         VALUES (?, ?, ?, ?, ?, ?)
         ON CONFLICT(device_id) DO UPDATE SET
-            name     = COALESCE(?, name),
-            email    = COALESCE(?, email),
-            country  = COALESCE(?, country),
+            name      = COALESCE(?, name),
+            email     = COALESCE(?, email),
+            country   = COALESCE(?, country),
             last_seen = ?
-    """, (
-        device_id, name, email, country, now, now,
-        name, email, country, now
-    ))
+    """, (device_id, name, email, country, now, now,
+          name, email, country, now))
 
-    # Link referral if provided
     if referral_code and email:
         c.execute("""
             UPDATE referrals
@@ -114,8 +120,7 @@ def register_user(
     return {"success": True}
 
 
-def update_usage(device_id: str, hours_delta: float):
-    """Update usage hours and check referral completion."""
+def update_usage(device_id, hours_delta):
     conn = get_db()
     c = conn.cursor()
     now = datetime.now().isoformat()
@@ -126,24 +131,17 @@ def update_usage(device_id: str, hours_delta: float):
         WHERE device_id = ?
     """, (hours_delta, now, device_id))
 
-    # Check referral progress
     c.execute("""
         SELECT id, usage_hours FROM referrals
         WHERE referred_device_id = ? AND is_complete = 0
     """, (device_id,))
-
     row = c.fetchone()
     referral_completed = False
 
     if row:
-        ref_id, current_hours = row
-        new_hours = current_hours + hours_delta
-
-        c.execute(
-            "UPDATE referrals SET usage_hours = ? WHERE id = ?",
-            (new_hours, ref_id)
-        )
-
+        ref_id, current = row
+        new_hours = current + hours_delta
+        c.execute("UPDATE referrals SET usage_hours = ? WHERE id = ?", (new_hours, ref_id))
         if new_hours >= 7:
             c.execute("""
                 UPDATE referrals SET is_complete = 1, completed_at = ?
@@ -153,76 +151,53 @@ def update_usage(device_id: str, hours_delta: float):
 
     conn.commit()
     conn.close()
-
     return {"success": True, "referral_completed": referral_completed}
 
 
-def create_referral(device_id: str, email: str):
-    """Create referral code for a user."""
+def create_referral(device_id, email):
     import hashlib
-
     conn = get_db()
     c = conn.cursor()
 
-    # Return existing code if already created
-    c.execute(
-        "SELECT referral_code FROM referrals WHERE referrer_device_id = ?",
-        (device_id,)
-    )
+    c.execute("SELECT referral_code FROM referrals WHERE referrer_device_id = ?", (device_id,))
     existing = c.fetchone()
     if existing:
         conn.close()
         return {"referral_code": existing[0], "is_new": False}
 
-    # Generate new code
     raw = f"{device_id}{email}{datetime.now()}".encode()
-    code_hash = hashlib.md5(raw).hexdigest()[:8].upper()
-    referral_code = f"REF-{code_hash}"
+    code = f"REF-{hashlib.md5(raw).hexdigest()[:8].upper()}"
 
     c.execute("""
         INSERT INTO referrals (referral_code, referrer_email, referrer_device_id, created_at)
         VALUES (?, ?, ?, ?)
-    """, (referral_code, email, device_id, datetime.now().isoformat()))
+    """, (code, email, device_id, datetime.now().isoformat()))
 
     conn.commit()
     conn.close()
-
-    return {"referral_code": referral_code, "is_new": True}
+    return {"referral_code": code, "is_new": True}
 
 
 def get_stats():
-    """Overview stats for admin dashboard."""
     conn = get_db()
     c = conn.cursor()
-
     c.execute("SELECT COUNT(*) FROM users")
     total = c.fetchone()[0]
-
     c.execute("SELECT COUNT(*) FROM users WHERE last_seen > datetime('now', '-7 days')")
     active = c.fetchone()[0]
-
     c.execute("SELECT SUM(total_hours) FROM users")
     hours = c.fetchone()[0] or 0
-
     conn.close()
-    return {
-        "total_users": total,
-        "active_7d": active,
-        "total_hours": round(hours, 1)
-    }
+    return {"total_users": total, "active_7d": active, "total_hours": round(hours, 1)}
 
 
 def get_all_users():
-    """Get all users for admin dashboard — includes name."""
     conn = get_db()
     c = conn.cursor()
-
     c.execute("""
         SELECT device_id, name, email, country, total_hours, license_tier, last_seen
-        FROM users
-        ORDER BY last_seen DESC
+        FROM users ORDER BY last_seen DESC
     """)
-
     users = []
     for row in c.fetchall():
         users.append({
@@ -234,23 +209,18 @@ def get_all_users():
             "tier":        row[5] or "free",
             "last_seen":   row[6],
         })
-
     conn.close()
     return users
 
 
 def get_all_referrals():
-    """Get all referrals."""
     conn = get_db()
     c = conn.cursor()
-
     c.execute("""
-        SELECT referral_code, referrer_email, referred_email, usage_hours,
-               is_complete, reward_sent, completed_at
-        FROM referrals
-        ORDER BY created_at DESC
+        SELECT referral_code, referrer_email, referred_email,
+               usage_hours, is_complete, reward_sent, completed_at
+        FROM referrals ORDER BY created_at DESC
     """)
-
     refs = []
     for row in c.fetchall():
         refs.append({
@@ -262,88 +232,160 @@ def get_all_referrals():
             "reward_sent":  bool(row[5]),
             "completed_at": row[6],
         })
-
     conn.close()
     return refs
 
 
 def get_pending_rewards():
-    """Completed referrals awaiting reward keys."""
     conn = get_db()
     c = conn.cursor()
-
     c.execute("""
         SELECT referral_code, referrer_email, referred_email
-        FROM referrals
-        WHERE is_complete = 1 AND reward_sent = 0
+        FROM referrals WHERE is_complete = 1 AND reward_sent = 0
     """)
-
-    pending = [
-        {"code": r[0], "referrer": r[1], "referred": r[2]}
-        for r in c.fetchall()
-    ]
+    pending = [{"code": r[0], "referrer": r[1], "referred": r[2]} for r in c.fetchall()]
     conn.close()
     return pending
 
 
-def mark_reward_sent(code: str):
-    """Mark reward as sent for a referral code."""
+def mark_reward_sent(code):
     conn = get_db()
     c = conn.cursor()
-    c.execute(
-        "UPDATE referrals SET reward_sent = 1 WHERE referral_code = ?",
-        (code,)
-    )
+    c.execute("UPDATE referrals SET reward_sent = 1 WHERE referral_code = ?", (code,))
     conn.commit()
     conn.close()
 
 
-def get_referral_stats(email: str = None, device_id: str = None):
-    """Get a user's referral stats."""
+def get_referral_stats(email=None, device_id=None):
     conn = get_db()
     c = conn.cursor()
-
     if email:
-        c.execute(
-            "SELECT referral_code FROM referrals WHERE referrer_email = ?",
-            (email,)
-        )
+        c.execute("SELECT referral_code FROM referrals WHERE referrer_email = ?", (email,))
     else:
-        c.execute(
-            "SELECT referral_code FROM referrals WHERE referrer_device_id = ?",
-            (device_id,)
-        )
-
+        c.execute("SELECT referral_code FROM referrals WHERE referrer_device_id = ?", (device_id,))
     row = c.fetchone()
     if not row:
         conn.close()
         return None
-
     code = row[0]
-
     c.execute("""
         SELECT COUNT(*) FROM referrals
-        WHERE referrer_email = (
-            SELECT referrer_email FROM referrals WHERE referral_code = ?
-        ) AND is_complete = 1
+        WHERE referrer_email = (SELECT referrer_email FROM referrals WHERE referral_code = ?)
+        AND is_complete = 1
     """, (code,))
     completed = c.fetchone()[0]
-
     c.execute("""
         SELECT COUNT(*) FROM referrals
-        WHERE referrer_email = (
-            SELECT referrer_email FROM referrals WHERE referral_code = ?
-        ) AND is_complete = 0 AND referred_email IS NOT NULL
+        WHERE referrer_email = (SELECT referrer_email FROM referrals WHERE referral_code = ?)
+        AND is_complete = 0 AND referred_email IS NOT NULL
     """, (code,))
     pending = c.fetchone()[0]
-
     conn.close()
+    return {"referral_code": code, "completed_referrals": completed, "pending_referrals": pending}
+
+
+# ── Updates ──
+
+def publish_update(version, download_url, size_mb, changelog,
+                   target_tier, is_critical, download_mode, auto_deliver):
+    """
+    Publish a new release. Called from admin dashboard.
+    Sets all previous releases to inactive, making this the live one.
+    """
+    conn = get_db()
+    c = conn.cursor()
+    now = datetime.now().isoformat()
+
+    # Deactivate all previous releases
+    c.execute("UPDATE updates SET is_active = 0")
+
+    c.execute("""
+        INSERT INTO updates
+            (version, download_url, size_mb, changelog, target_tier,
+             is_critical, download_mode, auto_deliver, is_active, published_at, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+        ON CONFLICT(version) DO UPDATE SET
+            download_url  = ?,
+            size_mb       = ?,
+            changelog     = ?,
+            target_tier   = ?,
+            is_critical   = ?,
+            download_mode = ?,
+            auto_deliver  = ?,
+            is_active     = 1,
+            published_at  = ?
+    """, (
+        version, download_url, size_mb, changelog, target_tier,
+        is_critical, download_mode, auto_deliver, now, now,
+        download_url, size_mb, changelog, target_tier,
+        is_critical, download_mode, auto_deliver, now
+    ))
+
+    conn.commit()
+    conn.close()
+    return {"success": True, "version": version}
+
+
+def get_latest_update():
+    """Return the currently active release or None."""
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("""
+        SELECT version, download_url, size_mb, changelog, target_tier,
+               is_critical, download_mode, auto_deliver, published_at
+        FROM updates
+        WHERE is_active = 1
+        ORDER BY published_at DESC LIMIT 1
+    """)
+    row = c.fetchone()
+    conn.close()
+    if not row:
+        return None
+    import json
     return {
-        "referral_code":       code,
-        "completed_referrals": completed,
-        "pending_referrals":   pending,
+        "version":       row[0],
+        "download_url":  row[1],
+        "size_mb":       row[2],
+        "changelog":     json.loads(row[3]) if row[3] else [],
+        "target_tier":   row[4],
+        "is_critical":   bool(row[5]),
+        "download_mode": row[6],
+        "auto_deliver":  bool(row[7]),
+        "published_at":  row[8],
     }
 
 
-# Initialize on import
+def get_all_updates():
+    """All releases for admin dashboard."""
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("""
+        SELECT version, target_tier, is_critical, download_mode,
+               auto_deliver, is_active, published_at
+        FROM updates ORDER BY published_at DESC
+    """)
+    updates = []
+    for row in c.fetchall():
+        updates.append({
+            "version":       row[0],
+            "target_tier":   row[1],
+            "is_critical":   bool(row[2]),
+            "download_mode": row[3],
+            "auto_deliver":  bool(row[4]),
+            "is_active":     bool(row[5]),
+            "published_at":  row[6],
+        })
+    conn.close()
+    return updates
+
+
+def toggle_auto_deliver(version, state):
+    """Toggle auto_deliver for a specific release."""
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("UPDATE updates SET auto_deliver = ? WHERE version = ?", (1 if state else 0, version))
+    conn.commit()
+    conn.close()
+
+
 init_db()
