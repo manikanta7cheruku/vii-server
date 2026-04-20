@@ -14,50 +14,59 @@ def init_db():
     """Initialize database tables."""
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    
+
     # Users table
     c.execute("""
         CREATE TABLE IF NOT EXISTS users (
-            device_id TEXT PRIMARY KEY,
-            email TEXT,
-            country TEXT,
+            device_id    TEXT PRIMARY KEY,
+            name         TEXT,
+            email        TEXT,
+            country      TEXT,
             install_date TEXT,
-            last_seen TEXT,
-            total_hours REAL DEFAULT 0,
+            last_seen    TEXT,
+            total_hours  REAL DEFAULT 0,
             license_tier TEXT DEFAULT 'free'
         )
     """)
-    
+
+    # ── Migration: add name column if it doesn't exist yet ──
+    # Safe to run every time — does nothing if column already exists
+    try:
+        c.execute("ALTER TABLE users ADD COLUMN name TEXT")
+        print("[DB] Migration: added 'name' column to users")
+    except sqlite3.OperationalError:
+        pass  # Column already exists — normal on fresh installs
+
     # Referrals table
     c.execute("""
         CREATE TABLE IF NOT EXISTS referrals (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            referral_code TEXT UNIQUE,
-            referrer_email TEXT,
+            id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+            referral_code      TEXT UNIQUE,
+            referrer_email     TEXT,
             referrer_device_id TEXT,
-            referred_email TEXT,
+            referred_email     TEXT,
             referred_device_id TEXT,
-            usage_hours REAL DEFAULT 0,
-            is_complete INTEGER DEFAULT 0,
-            reward_sent INTEGER DEFAULT 0,
-            completed_at TEXT,
-            created_at TEXT
+            usage_hours        REAL DEFAULT 0,
+            is_complete        INTEGER DEFAULT 0,
+            reward_sent        INTEGER DEFAULT 0,
+            completed_at       TEXT,
+            created_at         TEXT
         )
     """)
-    
+
     # Licenses table
     c.execute("""
         CREATE TABLE IF NOT EXISTS licenses (
             license_key TEXT PRIMARY KEY,
-            email TEXT,
-            tier TEXT,
-            plan_type TEXT,
-            created_at TEXT,
-            expires_at TEXT,
-            is_active INTEGER DEFAULT 1
+            email       TEXT,
+            tier        TEXT,
+            plan_type   TEXT,
+            created_at  TEXT,
+            expires_at  TEXT,
+            is_active   INTEGER DEFAULT 1
         )
     """)
-    
+
     conn.commit()
     conn.close()
     print("[DB] Initialized")
@@ -67,29 +76,39 @@ def get_db():
     return sqlite3.connect(DB_PATH)
 
 
-def register_user(device_id: str, email: str = None, country: str = None, referral_code: str = None):
-    """Register or update user."""
+def register_user(
+    device_id: str,
+    email: str = None,
+    name: str = None,
+    country: str = None,
+    referral_code: str = None,
+):
+    """Register or update user. Upserts on device_id."""
     conn = get_db()
     c = conn.cursor()
     now = datetime.now().isoformat()
-    
+
     c.execute("""
-        INSERT INTO users (device_id, email, country, install_date, last_seen)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO users (device_id, name, email, country, install_date, last_seen)
+        VALUES (?, ?, ?, ?, ?, ?)
         ON CONFLICT(device_id) DO UPDATE SET
-            email = COALESCE(?, email),
-            country = COALESCE(?, country),
+            name     = COALESCE(?, name),
+            email    = COALESCE(?, email),
+            country  = COALESCE(?, country),
             last_seen = ?
-    """, (device_id, email, country, now, now, email, country, now))
-    
+    """, (
+        device_id, name, email, country, now, now,
+        name, email, country, now
+    ))
+
     # Link referral if provided
     if referral_code and email:
         c.execute("""
-            UPDATE referrals 
+            UPDATE referrals
             SET referred_email = ?, referred_device_id = ?
             WHERE referral_code = ? AND referred_email IS NULL
         """, (email, device_id, referral_code))
-    
+
     conn.commit()
     conn.close()
     return {"success": True}
@@ -100,110 +119,122 @@ def update_usage(device_id: str, hours_delta: float):
     conn = get_db()
     c = conn.cursor()
     now = datetime.now().isoformat()
-    
-    # Update user hours
+
     c.execute("""
-        UPDATE users 
+        UPDATE users
         SET total_hours = total_hours + ?, last_seen = ?
         WHERE device_id = ?
     """, (hours_delta, now, device_id))
-    
+
     # Check referral progress
     c.execute("""
-        SELECT id, usage_hours FROM referrals 
+        SELECT id, usage_hours FROM referrals
         WHERE referred_device_id = ? AND is_complete = 0
     """, (device_id,))
-    
+
     row = c.fetchone()
     referral_completed = False
-    
+
     if row:
         ref_id, current_hours = row
         new_hours = current_hours + hours_delta
-        
-        c.execute("UPDATE referrals SET usage_hours = ? WHERE id = ?", (new_hours, ref_id))
-        
+
+        c.execute(
+            "UPDATE referrals SET usage_hours = ? WHERE id = ?",
+            (new_hours, ref_id)
+        )
+
         if new_hours >= 7:
             c.execute("""
-                UPDATE referrals SET is_complete = 1, completed_at = ? WHERE id = ?
+                UPDATE referrals SET is_complete = 1, completed_at = ?
+                WHERE id = ?
             """, (now, ref_id))
             referral_completed = True
-    
+
     conn.commit()
     conn.close()
-    
+
     return {"success": True, "referral_completed": referral_completed}
 
 
 def create_referral(device_id: str, email: str):
-    """Create referral code."""
+    """Create referral code for a user."""
     import hashlib
-    
+
     conn = get_db()
     c = conn.cursor()
-    
-    # Check existing
-    c.execute("SELECT referral_code FROM referrals WHERE referrer_device_id = ?", (device_id,))
+
+    # Return existing code if already created
+    c.execute(
+        "SELECT referral_code FROM referrals WHERE referrer_device_id = ?",
+        (device_id,)
+    )
     existing = c.fetchone()
     if existing:
         conn.close()
         return {"referral_code": existing[0], "is_new": False}
-    
-    # Create new
-    code_hash = hashlib.md5(f"{device_id}{email}{datetime.now()}".encode()).hexdigest()[:8].upper()
+
+    # Generate new code
+    raw = f"{device_id}{email}{datetime.now()}".encode()
+    code_hash = hashlib.md5(raw).hexdigest()[:8].upper()
     referral_code = f"REF-{code_hash}"
-    
+
     c.execute("""
         INSERT INTO referrals (referral_code, referrer_email, referrer_device_id, created_at)
         VALUES (?, ?, ?, ?)
     """, (referral_code, email, device_id, datetime.now().isoformat()))
-    
+
     conn.commit()
     conn.close()
-    
+
     return {"referral_code": referral_code, "is_new": True}
 
 
 def get_stats():
-    """Get overview stats."""
+    """Overview stats for admin dashboard."""
     conn = get_db()
     c = conn.cursor()
-    
+
     c.execute("SELECT COUNT(*) FROM users")
     total = c.fetchone()[0]
-    
+
     c.execute("SELECT COUNT(*) FROM users WHERE last_seen > datetime('now', '-7 days')")
     active = c.fetchone()[0]
-    
+
     c.execute("SELECT SUM(total_hours) FROM users")
     hours = c.fetchone()[0] or 0
-    
+
     conn.close()
-    
-    return {"total_users": total, "active_7d": active, "total_hours": round(hours, 1)}
+    return {
+        "total_users": total,
+        "active_7d": active,
+        "total_hours": round(hours, 1)
+    }
 
 
 def get_all_users():
-    """Get all users."""
+    """Get all users for admin dashboard — includes name."""
     conn = get_db()
     c = conn.cursor()
-    
+
     c.execute("""
-        SELECT device_id, email, country, total_hours, license_tier, last_seen
-        FROM users ORDER BY last_seen DESC
+        SELECT device_id, name, email, country, total_hours, license_tier, last_seen
+        FROM users
+        ORDER BY last_seen DESC
     """)
-    
+
     users = []
     for row in c.fetchall():
         users.append({
-            "device_id": row[0][:12] + "..." if row[0] else None,
-            "email": row[1] or "—",
-            "country": row[2] or "Unknown",
-            "total_hours": round(row[3] or 0, 1),
-            "tier": row[4] or "free",
-            "last_seen": row[5]
+            "device_id":   (row[0][:12] + "...") if row[0] else None,
+            "name":        row[1] or "—",
+            "email":       row[2] or "—",
+            "country":     row[3] or "—",
+            "total_hours": round(row[4] or 0, 1),
+            "tier":        row[5] or "free",
+            "last_seen":   row[6],
         })
-    
+
     conn.close()
     return users
 
@@ -212,78 +243,106 @@ def get_all_referrals():
     """Get all referrals."""
     conn = get_db()
     c = conn.cursor()
-    
+
     c.execute("""
-        SELECT referral_code, referrer_email, referred_email, usage_hours, 
+        SELECT referral_code, referrer_email, referred_email, usage_hours,
                is_complete, reward_sent, completed_at
-        FROM referrals ORDER BY created_at DESC
+        FROM referrals
+        ORDER BY created_at DESC
     """)
-    
+
     refs = []
     for row in c.fetchall():
         refs.append({
-            "code": row[0],
-            "referrer": row[1],
-            "referred": row[2] or "—",
-            "hours": round(row[3] or 0, 1),
-            "complete": bool(row[4]),
-            "reward_sent": bool(row[5]),
-            "completed_at": row[6]
+            "code":         row[0],
+            "referrer":     row[1],
+            "referred":     row[2] or "—",
+            "hours":        round(row[3] or 0, 1),
+            "complete":     bool(row[4]),
+            "reward_sent":  bool(row[5]),
+            "completed_at": row[6],
         })
-    
+
     conn.close()
     return refs
 
 
 def get_pending_rewards():
-    """Get completed referrals awaiting rewards."""
+    """Completed referrals awaiting reward keys."""
     conn = get_db()
     c = conn.cursor()
-    
+
     c.execute("""
         SELECT referral_code, referrer_email, referred_email
-        FROM referrals WHERE is_complete = 1 AND reward_sent = 0
+        FROM referrals
+        WHERE is_complete = 1 AND reward_sent = 0
     """)
-    
-    pending = [{"code": r[0], "referrer": r[1], "referred": r[2]} for r in c.fetchall()]
+
+    pending = [
+        {"code": r[0], "referrer": r[1], "referred": r[2]}
+        for r in c.fetchall()
+    ]
     conn.close()
     return pending
 
 
 def mark_reward_sent(code: str):
-    """Mark reward as sent."""
+    """Mark reward as sent for a referral code."""
     conn = get_db()
     c = conn.cursor()
-    c.execute("UPDATE referrals SET reward_sent = 1 WHERE referral_code = ?", (code,))
+    c.execute(
+        "UPDATE referrals SET reward_sent = 1 WHERE referral_code = ?",
+        (code,)
+    )
     conn.commit()
     conn.close()
 
 
 def get_referral_stats(email: str = None, device_id: str = None):
-    """Get user's referral stats."""
+    """Get a user's referral stats."""
     conn = get_db()
     c = conn.cursor()
-    
+
     if email:
-        c.execute("SELECT referral_code FROM referrals WHERE referrer_email = ?", (email,))
+        c.execute(
+            "SELECT referral_code FROM referrals WHERE referrer_email = ?",
+            (email,)
+        )
     else:
-        c.execute("SELECT referral_code FROM referrals WHERE referrer_device_id = ?", (device_id,))
-    
+        c.execute(
+            "SELECT referral_code FROM referrals WHERE referrer_device_id = ?",
+            (device_id,)
+        )
+
     row = c.fetchone()
     if not row:
         conn.close()
         return None
-    
+
     code = row[0]
-    
-    c.execute("SELECT COUNT(*) FROM referrals WHERE referrer_email = (SELECT referrer_email FROM referrals WHERE referral_code = ?) AND is_complete = 1", (code,))
+
+    c.execute("""
+        SELECT COUNT(*) FROM referrals
+        WHERE referrer_email = (
+            SELECT referrer_email FROM referrals WHERE referral_code = ?
+        ) AND is_complete = 1
+    """, (code,))
     completed = c.fetchone()[0]
-    
-    c.execute("SELECT COUNT(*) FROM referrals WHERE referrer_email = (SELECT referrer_email FROM referrals WHERE referral_code = ?) AND is_complete = 0 AND referred_email IS NOT NULL", (code,))
+
+    c.execute("""
+        SELECT COUNT(*) FROM referrals
+        WHERE referrer_email = (
+            SELECT referrer_email FROM referrals WHERE referral_code = ?
+        ) AND is_complete = 0 AND referred_email IS NOT NULL
+    """, (code,))
     pending = c.fetchone()[0]
-    
+
     conn.close()
-    return {"referral_code": code, "completed_referrals": completed, "pending_referrals": pending}
+    return {
+        "referral_code":       code,
+        "completed_referrals": completed,
+        "pending_referrals":   pending,
+    }
 
 
 # Initialize on import
