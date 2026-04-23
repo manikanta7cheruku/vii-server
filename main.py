@@ -414,8 +414,8 @@ async function showTab(tab) {
                             class="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-sm font-mono focus:border-indigo-500 outline-none"/>
                     </div>
                     <div>
-                        <label class="text-xs text-zinc-500 block mb-1">Download URL (Cloudflare R2)</label>
-                        <input id="u-url" placeholder="https://pub-xxx.r2.dev/SEVEN-Setup-1.2.0.exe"
+                        <label class="text-xs text-zinc-500 block mb-1">Download URL (GitHub Releases)</label>
+                        <input id="u-url" placeholder="https://github.com/manikanta7cheruku/seven-releases/releases/download/v1.2.0/SEVEN-Setup-1.2.0.exe"
                             class="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-sm focus:border-indigo-500 outline-none"/>
                     </div>
                     <div>
