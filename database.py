@@ -124,16 +124,28 @@ def register_user(device_id, email=None, name=None, country=None, referral_code=
     return {"success": True}
 
 
-def update_usage(device_id, hours_delta):
+def update_usage(device_id, hours_delta=None, minutes_delta=None):
+    """
+    Accept either minutes_delta (new) or hours_delta (legacy).
+    Internally always stores as hours for DB compatibility.
+    """
     conn = get_db()
-    c = conn.cursor()
-    now = datetime.now().isoformat()
+    c    = conn.cursor()
+    now  = datetime.now().isoformat()
+
+    # Support both old hours and new minutes
+    if minutes_delta is not None:
+        hours_add = minutes_delta / 60.0
+    elif hours_delta is not None:
+        hours_add = hours_delta
+    else:
+        hours_add = 0
 
     c.execute("""
         UPDATE users
         SET total_hours = total_hours + ?, last_seen = ?
         WHERE device_id = ?
-    """, (hours_delta, now, device_id))
+    """, (hours_add, now, device_id))
 
     c.execute("""
         SELECT id, usage_hours FROM referrals
@@ -182,34 +194,60 @@ def create_referral(device_id, email):
     return {"referral_code": code, "is_new": True}
 
 
+def _fmt(total_minutes):
+    """Format minutes → '1 day 2 hr 30 min' for admin display."""
+    m = int(total_minutes or 0)
+    d = m // 1440
+    m %= 1440
+    h = m // 60
+    m %= 60
+    if d > 0:
+        return f"{d}d {h}h {m}m"
+    elif h > 0:
+        return f"{h}h {m}m"
+    else:
+        return f"{m}m"
+
+
 def get_stats():
     conn = get_db()
-    c = conn.cursor()
+    c    = conn.cursor()
     c.execute("SELECT COUNT(*) FROM users")
     total = c.fetchone()[0]
-    c.execute("SELECT COUNT(*) FROM users WHERE last_seen > datetime('now', '-7 days')")
+    c.execute("""
+        SELECT COUNT(*) FROM users
+        WHERE last_seen > datetime('now', '-7 days')
+    """)
     active = c.fetchone()[0]
     c.execute("SELECT SUM(total_hours) FROM users")
-    hours = c.fetchone()[0] or 0
+    hours      = c.fetchone()[0] or 0
+    total_mins = hours * 60
     conn.close()
-    return {"total_users": total, "active_7d": active, "total_hours": round(hours, 1)}
+    return {
+        "total_users":  total,
+        "active_7d":    active,
+        "total_hours":  round(hours, 1),
+        "total_time":   _fmt(total_mins),   # e.g. "16h 57m"
+    }
 
 
 def get_all_users():
     conn = get_db()
-    c = conn.cursor()
+    c    = conn.cursor()
     c.execute("""
         SELECT device_id, name, email, country, total_hours, license_tier, last_seen
         FROM users ORDER BY last_seen DESC
     """)
     users = []
     for row in c.fetchall():
+        total_mins = (row[4] or 0) * 60
         users.append({
             "device_id":   (row[0][:12] + "...") if row[0] else None,
             "name":        row[1] or "—",
             "email":       row[2] or "—",
             "country":     row[3] or "—",
             "total_hours": round(row[4] or 0, 1),
+            "total_time":  _fmt(total_mins),   # "16h 57m"
             "tier":        row[5] or "free",
             "last_seen":   row[6],
         })

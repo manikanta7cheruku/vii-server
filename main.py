@@ -34,9 +34,10 @@ class RegisterRequest(BaseModel):
 
 
 class UsagePingRequest(BaseModel):
-    device_id: str
-    hours_delta: float
-    email: Optional[str] = None
+    device_id:      str
+    hours_delta:    Optional[float] = None   # legacy
+    minutes_delta:  Optional[float] = None   # new — preferred
+    email:          Optional[str]   = None
 
 
 class ReferralRequest(BaseModel):
@@ -79,7 +80,12 @@ def register(req: RegisterRequest):
 def usage_ping(req: UsagePingRequest):
     if req.email:
         db.register_user(req.device_id, email=req.email)
-    return db.update_usage(req.device_id, req.hours_delta)
+    # Accept minutes_delta (new) or hours_delta (legacy clients)
+    return db.update_usage(
+        req.device_id,
+        hours_delta=req.hours_delta,
+        minutes_delta=getattr(req, "minutes_delta", None)
+    )
 
 
 @app.post("/api/referral/create")
@@ -297,8 +303,8 @@ async function load() {
             <div class="text-3xl font-mono font-bold text-green-400">${stats.active_7d}</div>
         </div>
         <div class="bg-zinc-900 border border-zinc-800 rounded-xl p-5">
-            <div class="text-[10px] text-zinc-500 tracking-widest mb-1">TOTAL HOURS</div>
-            <div class="text-3xl font-mono font-bold text-indigo-400">${stats.total_hours}</div>
+            <div class="text-[10px] text-zinc-500 tracking-widest mb-1">TOTAL TIME</div>
+            <div class="text-3xl font-mono font-bold text-indigo-400">${stats.total_time}</div>
         </div>
     `;
 
@@ -345,7 +351,7 @@ async function showTab(tab) {
                 <th class="text-left pb-3">DEVICE</th>
                 <th class="text-left pb-3">NAME</th>
                 <th class="text-left pb-3">EMAIL</th>
-                <th class="text-left pb-3">HOURS</th>
+                <th class="text-left pb-3">TIME USED</th>
                 <th class="text-left pb-3">TIER</th>
                 <th class="text-left pb-3">LAST SEEN</th>
             </tr></thead><tbody>`;
@@ -354,7 +360,7 @@ async function showTab(tab) {
                 <td class="py-3 font-mono text-xs text-zinc-500">${u.device_id}</td>
                 <td class="py-3 font-medium">${u.name}</td>
                 <td class="py-3 text-zinc-300">${u.email}</td>
-                <td class="py-3 font-mono text-indigo-400">${u.total_hours}h</td>
+                <td class="py-3 font-mono text-indigo-400">${u.total_time}</td>
                 <td class="py-3">
                     <span class="text-[10px] px-2 py-0.5 rounded font-medium ${
                         u.tier==='ultimate' ? 'bg-indigo-500/20 text-indigo-300' :
