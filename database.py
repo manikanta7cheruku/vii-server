@@ -7,7 +7,11 @@ import sqlite3
 import os
 from datetime import datetime
 
-DB_PATH = "seven_analytics.db"
+import os
+# On Render: use /data/ disk (persistent) if available, else local
+# To enable persistent disk: Render dashboard → your service → Disks → Add
+# Mount path: /data   Size: 1GB (free)
+DB_PATH = os.environ.get("DB_PATH", "seven_analytics.db")
 
 
 def init_db():
