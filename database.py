@@ -206,11 +206,6 @@ def get_stats():
     c.execute("SELECT COUNT(*) FROM users")
     total = c.fetchone()[0]
 
-    c.execute("""
-        SELECT COUNT(*) FROM users
-        WHERE last_seen > %s
-    """, (datetime.now().strftime("%Y-%m-%dT00:00:00"),))
-    # Use 7 days ago string
     from datetime import timedelta
     seven_days_ago = (datetime.now() - timedelta(days=7)).isoformat()
     c.execute("""
