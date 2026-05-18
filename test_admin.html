@@ -1,0 +1,442 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Seven Server Test Panel</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-zinc-950 text-zinc-200 p-6 font-mono">
+<div class="max-w-4xl mx-auto space-y-6">
+
+    <div class="flex items-center justify-between">
+        <h1 class="text-lg font-bold text-indigo-400">SEVEN SERVER — TEST PANEL</h1>
+        <div class="text-xs text-zinc-500">Tests every endpoint without real Seven app</div>
+    </div>
+
+    <!-- Server URL input -->
+    <div class="bg-zinc-900 border border-zinc-700 rounded-xl p-4 space-y-3">
+        <p class="text-xs text-zinc-500 tracking-widest">SERVER URL</p>
+        <div class="flex gap-2">
+            <input id="server-url"
+                value="https://seven-server-u2rp.onrender.com"
+                class="flex-1 bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-sm focus:border-indigo-500 outline-none"/>
+            <button onclick="runAllTests()"
+                class="px-6 py-2 bg-indigo-500 hover:bg-indigo-600 rounded-lg text-sm font-medium transition-colors">
+                RUN ALL TESTS
+            </button>
+        </div>
+    </div>
+
+    <!-- Overall result -->
+    <div id="overall" class="hidden bg-zinc-900 border rounded-xl p-4">
+        <p class="text-sm font-bold" id="overall-text"></p>
+    </div>
+
+    <!-- Test results -->
+    <div id="tests" class="space-y-3"></div>
+
+</div>
+
+<script>
+const BASE = () => document.getElementById('server-url').value.trim().replace(/\/$/, '');
+
+// ── All tests defined here ──
+const TESTS = [
+
+    // ── HEALTH ──
+    {
+        group: "HEALTH",
+        name: "Server alive",
+        run: async (base) => {
+            const r = await fetch(`${base}/health`);
+            const d = await r.json();
+            return {
+                pass: r.ok && d.status === "ok",
+                detail: `status=${d.status} time=${d.time}`
+            };
+        }
+    },
+
+    // ── USERS ──
+    {
+        group: "USERS",
+        name: "Register new device",
+        run: async (base) => {
+            const r = await fetch(`${base}/api/register`, {
+                method: "POST",
+                headers: {"Content-Type": "application/json"},
+                body: JSON.stringify({
+                    device_id: "TEST-DEVICE-001",
+                    name: "Test User",
+                    email: "test@seven.app",
+                    country: "IN"
+                })
+            });
+            const d = await r.json();
+            return {
+                pass: d.success === true,
+                detail: JSON.stringify(d)
+            };
+        }
+    },
+    {
+        group: "USERS",
+        name: "Register second device (no email)",
+        run: async (base) => {
+            const r = await fetch(`${base}/api/register`, {
+                method: "POST",
+                headers: {"Content-Type": "application/json"},
+                body: JSON.stringify({
+                    device_id: "TEST-DEVICE-002",
+                    country: "IN"
+                })
+            });
+            const d = await r.json();
+            return {
+                pass: d.success === true,
+                detail: JSON.stringify(d)
+            };
+        }
+    },
+    {
+        group: "USERS",
+        name: "Send usage ping",
+        run: async (base) => {
+            const r = await fetch(`${base}/api/usage/ping`, {
+                method: "POST",
+                headers: {"Content-Type": "application/json"},
+                body: JSON.stringify({
+                    device_id: "TEST-DEVICE-001",
+                    hours_delta: 1.5,
+                    email: "test@seven.app"
+                })
+            });
+            const d = await r.json();
+            return {
+                pass: d.success === true,
+                detail: `referral_completed=${d.referral_completed}`
+            };
+        }
+    },
+    {
+        group: "USERS",
+        name: "Get admin stats",
+        run: async (base) => {
+            const r = await fetch(`${base}/admin/stats`);
+            const d = await r.json();
+            return {
+                pass: r.ok && typeof d.total_users === "number",
+                detail: `users=${d.total_users} active=${d.active_7d} hours=${d.total_hours}`
+            };
+        }
+    },
+    {
+        group: "USERS",
+        name: "Get all users",
+        run: async (base) => {
+            const r = await fetch(`${base}/admin/users`);
+            const d = await r.json();
+            const found = d.find(u => u.email === "test@seven.app");
+            return {
+                pass: r.ok && Array.isArray(d) && d.length > 0,
+                detail: `count=${d.length} test_user_found=${!!found}`
+            };
+        }
+    },
+
+    // ── REFERRALS ──
+    {
+        group: "REFERRALS",
+        name: "Create referral code",
+        run: async (base) => {
+            const r = await fetch(`${base}/api/referral/create`, {
+                method: "POST",
+                headers: {"Content-Type": "application/json"},
+                body: JSON.stringify({
+                    device_id: "TEST-DEVICE-001",
+                    email: "test@seven.app"
+                })
+            });
+            const d = await r.json();
+            window._testRefCode = d.referral_code;
+            return {
+                pass: !!d.referral_code,
+                detail: `code=${d.referral_code} is_new=${d.is_new}`
+            };
+        }
+    },
+    {
+        group: "REFERRALS",
+        name: "Register referred device with code",
+        run: async (base) => {
+            const code = window._testRefCode;
+            if (!code) return { pass: false, detail: "No referral code from previous test" };
+            const r = await fetch(`${base}/api/register`, {
+                method: "POST",
+                headers: {"Content-Type": "application/json"},
+                body: JSON.stringify({
+                    device_id: "TEST-DEVICE-003",
+                    email: "referred@seven.app",
+                    referral_code: code
+                })
+            });
+            const d = await r.json();
+            return {
+                pass: d.success === true,
+                detail: `registered with code=${code}`
+            };
+        }
+    },
+    {
+        group: "REFERRALS",
+        name: "Send 7 hours usage for referred user",
+        run: async (base) => {
+            const r = await fetch(`${base}/api/usage/ping`, {
+                method: "POST",
+                headers: {"Content-Type": "application/json"},
+                body: JSON.stringify({
+                    device_id: "TEST-DEVICE-003",
+                    hours_delta: 7.0
+                })
+            });
+            const d = await r.json();
+            return {
+                pass: d.success === true && d.referral_completed === true,
+                detail: `referral_completed=${d.referral_completed} ← must be TRUE`
+            };
+        }
+    },
+    {
+        group: "REFERRALS",
+        name: "Get referral stats",
+        run: async (base) => {
+            const r = await fetch(`${base}/api/referral/stats?device_id=TEST-DEVICE-001`);
+            const d = await r.json();
+            return {
+                pass: r.ok && !!d.referral_code,
+                detail: `code=${d.referral_code} completed=${d.completed_referrals} pending=${d.pending_referrals}`
+            };
+        }
+    },
+    {
+        group: "REFERRALS",
+        name: "Get pending rewards",
+        run: async (base) => {
+            const r = await fetch(`${base}/admin/rewards/pending`);
+            const d = await r.json();
+            return {
+                pass: r.ok && Array.isArray(d),
+                detail: `pending_count=${d.length} ${d.length > 0 ? '← reward ready to send' : ''}`
+            };
+        }
+    },
+    {
+        group: "REFERRALS",
+        name: "Mark reward as sent",
+        run: async (base) => {
+            const code = window._testRefCode;
+            if (!code) return { pass: false, detail: "No referral code" };
+            const r = await fetch(`${base}/admin/rewards/sent/${code}`, { method: "POST" });
+            const d = await r.json();
+            return {
+                pass: d.success === true,
+                detail: `marked sent for code=${code}`
+            };
+        }
+    },
+    {
+        group: "REFERRALS",
+        name: "All referrals list",
+        run: async (base) => {
+            const r = await fetch(`${base}/admin/referrals`);
+            const d = await r.json();
+            return {
+                pass: r.ok && Array.isArray(d),
+                detail: `count=${d.length}`
+            };
+        }
+    },
+
+    // ── UPDATES ──
+    {
+        group: "UPDATES",
+        name: "Publish a test release",
+        run: async (base) => {
+            const r = await fetch(`${base}/admin/updates/publish`, {
+                method: "POST",
+                headers: {"Content-Type": "application/json"},
+                body: JSON.stringify({
+                    version: "1.1.0-test",
+                    download_url: "https://github.com/manikanta7cheruku/seven-releases/releases/download/v1.1.0/SEVEN.Setup.1.1.0.exe",
+                    size_mb: 145,
+                    changelog: ["Test release", "Admin panel working"],
+                    target_tier: "all",
+                    is_critical: false,
+                    download_mode: "manual",
+                    auto_deliver: true
+                })
+            });
+            const d = await r.json();
+            return {
+                pass: d.success === true,
+                detail: `version=${d.version}`
+            };
+        }
+    },
+    {
+        group: "UPDATES",
+        name: "Get latest update (free user, old version)",
+        run: async (base) => {
+            const r = await fetch(`${base}/api/updates/latest?tier=free&current_version=0.0.1`);
+            const d = await r.json();
+            return {
+                pass: r.ok && d.update_available === true,
+                detail: `update_available=${d.update_available} version=${d.version}`
+            };
+        }
+    },
+    {
+        group: "UPDATES",
+        name: "Get latest update (already up to date)",
+        run: async (base) => {
+            const r = await fetch(`${base}/api/updates/latest?tier=free&current_version=9.9.9`);
+            const d = await r.json();
+            return {
+                pass: r.ok && d.update_available === false,
+                detail: `update_available=${d.update_available} ← must be FALSE`
+            };
+        }
+    },
+    {
+        group: "UPDATES",
+        name: "Toggle auto-deliver off",
+        run: async (base) => {
+            const r = await fetch(`${base}/admin/updates/toggle-deliver`, {
+                method: "POST",
+                headers: {"Content-Type": "application/json"},
+                body: JSON.stringify({ version: "1.1.0-test", auto_deliver: false })
+            });
+            const d = await r.json();
+            return {
+                pass: d.success === true,
+                detail: "toggled auto_deliver → OFF"
+            };
+        }
+    },
+    {
+        group: "UPDATES",
+        name: "Confirm update blocked when auto-deliver off",
+        run: async (base) => {
+            const r = await fetch(`${base}/api/updates/latest?tier=free&current_version=0.0.1`);
+            const d = await r.json();
+            return {
+                pass: d.update_available === false,
+                detail: `update_available=${d.update_available} ← must be FALSE (auto-deliver is off)`
+            };
+        }
+    },
+    {
+        group: "UPDATES",
+        name: "All updates list",
+        run: async (base) => {
+            const r = await fetch(`${base}/admin/updates/all`);
+            const d = await r.json();
+            return {
+                pass: r.ok && Array.isArray(d),
+                detail: `count=${d.length}`
+            };
+        }
+    },
+
+    // ── CLEANUP ──
+    {
+        group: "CLEANUP NOTE",
+        name: "Test data was written to your real DB",
+        run: async (base) => {
+            return {
+                pass: true,
+                detail: "⚠ TEST-DEVICE-001/002/003 and version 1.1.0-test now exist in your DB. This is fine for testing. They will show in admin dashboard."
+            };
+        }
+    },
+];
+
+// ── Run all tests ──
+async function runAllTests() {
+    const base = BASE();
+    const container = document.getElementById('tests');
+    container.innerHTML = '';
+
+    let passed = 0;
+    let failed = 0;
+    let currentGroup = '';
+
+    for (const test of TESTS) {
+
+        // Group header
+        if (test.group !== currentGroup) {
+            currentGroup = test.group;
+            container.innerHTML += `
+                <div class="text-[10px] text-zinc-500 tracking-widest pt-4 pb-1">
+                    ── ${test.group} ──
+                </div>`;
+        }
+
+        // Row placeholder
+        const id = `test-${Math.random().toString(36).slice(2)}`;
+        container.innerHTML += `
+            <div id="${id}" class="bg-zinc-900 border border-zinc-800 rounded-lg px-4 py-3 flex items-center justify-between">
+                <span class="text-sm">${test.name}</span>
+                <span class="text-xs text-zinc-500">running...</span>
+            </div>`;
+
+        // Run test
+        let result;
+        try {
+            result = await test.run(base);
+        } catch(e) {
+            result = { pass: false, detail: `ERROR: ${e.message}` };
+        }
+
+        // Update row
+        const el = document.getElementById(id);
+        if (result.pass) {
+            passed++;
+            el.className = "bg-green-500/5 border border-green-500/20 rounded-lg px-4 py-3 flex items-center justify-between";
+            el.innerHTML = `
+                <span class="text-sm text-green-300">${test.name}</span>
+                <div class="text-right">
+                    <span class="text-[10px] px-2 py-0.5 rounded bg-green-500/20 text-green-400 mr-2">PASS</span>
+                    <span class="text-xs text-zinc-500">${result.detail}</span>
+                </div>`;
+        } else {
+            failed++;
+            el.className = "bg-red-500/5 border border-red-500/20 rounded-lg px-4 py-3 flex items-center justify-between";
+            el.innerHTML = `
+                <span class="text-sm text-red-300">${test.name}</span>
+                <div class="text-right">
+                    <span class="text-[10px] px-2 py-0.5 rounded bg-red-500/20 text-red-400 mr-2">FAIL</span>
+                    <span class="text-xs text-zinc-500">${result.detail}</span>
+                </div>`;
+        }
+
+        // Small delay so UI updates visually
+        await new Promise(r => setTimeout(r, 200));
+    }
+
+    // Overall
+    const overall = document.getElementById('overall');
+    const text = document.getElementById('overall-text');
+    overall.classList.remove('hidden');
+    if (failed === 0) {
+        overall.className = "bg-green-500/5 border border-green-500/20 rounded-xl p-4";
+        text.className = "text-sm font-bold text-green-400";
+        text.textContent = `✓ ALL ${passed} TESTS PASSED — Server is working correctly`;
+    } else {
+        overall.className = "bg-red-500/5 border border-red-500/20 rounded-xl p-4";
+        text.className = "text-sm font-bold text-red-400";
+        text.textContent = `✗ ${failed} TESTS FAILED, ${passed} passed — Check red items above`;
+    }
+}
+</script>
+</body>
+</html>
