@@ -225,6 +225,18 @@ def all_updates():
     return db.get_all_updates()
 
 
+@app.delete("/admin/users/clear")
+def clear_all_users():
+    """Clear all users for testing. Remove this in production."""
+    conn = db.get_db()
+    c = conn.cursor()
+    c.execute("DELETE FROM users")
+    c.execute("DELETE FROM referrals")
+    conn.commit()
+    conn.close()
+    return {"success": True, "message": "All users cleared"}
+
+
 @app.get("/health")
 def health():
     return {"status": "ok", "time": datetime.now().isoformat()}
