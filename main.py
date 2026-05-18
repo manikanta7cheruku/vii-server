@@ -134,14 +134,16 @@ def get_latest_update(tier: str = "free", current_version: str = "0.0.0"):
     if not eligible:
         return {"update_available": False, "reason": "tier_locked"}
 
-    # Compare versions — simple string split comparison
+    # Compare versions — strips any suffix like "-test" or "-beta"
     def parse_version(v):
         try:
-            return [int(x) for x in v.strip().split(".")]
+            # Remove suffix like -test, -beta, -rc1
+            clean = v.strip().split("-")[0]
+            return [int(x) for x in clean.split(".")]
         except Exception:
             return [0, 0, 0]
 
-    latest = parse_version(update["version"])
+    latest  = parse_version(update["version"])
     current = parse_version(current_version)
 
     if latest <= current:
