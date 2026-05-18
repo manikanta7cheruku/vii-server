@@ -13,6 +13,16 @@ from datetime import datetime
 # Environment variable: DB_PATH = /data/seven_analytics.db
 DB_PATH = os.environ.get("DB_PATH", "seven_analytics.db")
 
+# Create the directory if it doesn't exist
+# This handles the case where /data/ disk is not yet mounted
+_db_dir = os.path.dirname(DB_PATH)
+if _db_dir and not os.path.exists(_db_dir):
+    try:
+        os.makedirs(_db_dir, exist_ok=True)
+    except Exception:
+        # If /data/ can't be created (no disk mounted), fall back to local
+        DB_PATH = "seven_analytics.db"
+
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)
