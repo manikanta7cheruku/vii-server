@@ -242,6 +242,12 @@ def health():
     return {"status": "ok", "time": datetime.now().isoformat()}
 
 
+@app.get("/ping")
+def ping():
+    """Lightweight keepalive endpoint."""
+    return {"ok": True}
+
+
 # =============================================================================
 # ADMIN DASHBOARD UI
 # =============================================================================
