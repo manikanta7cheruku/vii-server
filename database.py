@@ -5,12 +5,12 @@ Minimal SQLite database for analytics + update management
 
 import sqlite3
 import os
+import json
 from datetime import datetime
 
-import os
-# On Render: use /data/ disk (persistent) if available, else local
-# To enable persistent disk: Render dashboard → your service → Disks → Add
-# Mount path: /data   Size: 1GB (free)
+# DB_PATH — uses persistent disk on Render if DB_PATH env var is set
+# Render dashboard → your service → Disks → Mount: /data → then set:
+# Environment variable: DB_PATH = /data/seven_analytics.db
 DB_PATH = os.environ.get("DB_PATH", "seven_analytics.db")
 
 
@@ -156,8 +156,9 @@ def update_usage(device_id, hours_delta=None, minutes_delta=None):
 
     if row:
         ref_id, current = row
-        new_hours = current + hours_delta
-        c.execute("UPDATE referrals SET usage_hours = ? WHERE id = ?", (new_hours, ref_id))
+        new_hours = current + hours_add   # use hours_add not hours_delta
+        c.execute("UPDATE referrals SET usage_hours = ? WHERE id = ?",
+                  (new_hours, ref_id))
         if new_hours >= 7:
             c.execute("""
                 UPDATE referrals SET is_complete = 1, completed_at = ?
