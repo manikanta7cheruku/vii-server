@@ -393,37 +393,102 @@ async function showTab(tab) {
 
     } else if (tab === 'referrals') {
         const refs = await fetch('/admin/referrals').then(r => r.json());
-        let html = `<table class="w-full text-sm">
-            <thead><tr class="text-[10px] text-zinc-500 tracking-widest border-b border-zinc-800">
-                <th class="text-left pb-3">CODE</th>
-                <th class="text-left pb-3">REFERRER</th>
-                <th class="text-left pb-3">REFERRED</th>
-                <th class="text-left pb-3">PROGRESS</th>
-                <th class="text-left pb-3">STATUS</th>
-            </tr></thead><tbody>`;
-        refs.forEach(r => {
-            const pct = Math.min(Math.round((r.hours/7)*100), 100);
-            const badge = r.complete
-                ? (r.reward_sent
-                    ? '<span class="text-[10px] px-2 py-0.5 rounded bg-zinc-700/50 text-zinc-400">SENT</span>'
-                    : '<span class="text-[10px] px-2 py-0.5 rounded bg-green-500/20 text-green-400">REWARD PENDING</span>')
-                : '<span class="text-[10px] px-2 py-0.5 rounded bg-zinc-700/50 text-zinc-500">IN PROGRESS</span>';
-            html += `<tr class="border-b border-zinc-800/50 hover:bg-zinc-800/20">
-                <td class="py-3 font-mono text-xs text-zinc-400">${r.code}</td>
-                <td class="py-3">${r.referrer||'—'}</td>
-                <td class="py-3">${r.referred||'—'}</td>
-                <td class="py-3">
-                    <div class="flex items-center gap-2">
-                        <div class="w-20 h-1.5 bg-zinc-800 rounded-full overflow-hidden">
-                            <div class="h-full bg-indigo-500 rounded-full" style="width:${pct}%"></div>
-                        </div>
-                        <span class="text-xs font-mono text-zinc-400">${r.hours}h/7h</span>
+        const pending = await fetch('/admin/rewards/pending').then(r => r.json());
+
+        let html = '';
+
+        // Pending rewards banner
+        if (pending.length > 0) {
+            html += `<div class="mb-4 bg-green-500/5 border border-green-500/20 rounded-xl p-4">
+                <div class="text-green-400 font-semibold text-sm mb-3">
+                    ${pending.length} reward${pending.length > 1 ? 's' : ''} ready to send
+                </div>`;
+            pending.forEach(p => {
+                html += `<div class="bg-zinc-900 rounded-lg p-3 mb-2">
+                    <div class="text-xs mb-1">
+                        Referrer: <span class="text-indigo-400 font-mono">${p.referrer||'—'}</span>
+                        <span class="text-zinc-600 mx-1">→</span>
+                        <span class="text-[10px] text-zinc-400">Ultimate 1 month</span>
                     </div>
-                </td>
-                <td class="py-3">${badge}</td>
-            </tr>`;
-        });
-        content.innerHTML = html + '</tbody></table>';
+                    <div class="text-xs mb-2">
+                        Referred: <span class="text-green-400 font-mono">${p.referred||'—'}</span>
+                        <span class="text-zinc-600 mx-1">→</span>
+                        <span class="text-[10px] text-zinc-400">Pro 1 month</span>
+                    </div>
+                    <div class="text-[10px] text-zinc-500 font-mono bg-zinc-800 rounded px-2 py-1">
+                        python admin_tools.py reward ${p.referred||'?'} ${p.referrer||'?'}
+                    </div>
+                    <button onclick="markSent('${p.code}')"
+                        class="mt-2 px-3 py-1 bg-green-500 hover:bg-green-600 rounded text-xs font-medium transition-colors">
+                        Mark Sent
+                    </button>
+                </div>`;
+            });
+            html += '</div>';
+        }
+
+        // Stats summary
+        const total    = refs.length;
+        const done     = refs.filter(r => r.complete).length;
+        const progress = refs.filter(r => !r.complete).length;
+
+        html += `<div class="grid grid-cols-3 gap-3 mb-4">
+            <div class="bg-zinc-900 border border-zinc-800 rounded-xl p-3 text-center">
+                <div class="text-2xl font-mono font-bold">${total}</div>
+                <div class="text-[10px] text-zinc-500 mt-1">TOTAL</div>
+            </div>
+            <div class="bg-zinc-900 border border-zinc-800 rounded-xl p-3 text-center">
+                <div class="text-2xl font-mono font-bold text-green-400">${done}</div>
+                <div class="text-[10px] text-zinc-500 mt-1">COMPLETED</div>
+            </div>
+            <div class="bg-zinc-900 border border-zinc-800 rounded-xl p-3 text-center">
+                <div class="text-2xl font-mono font-bold text-yellow-400">${progress}</div>
+                <div class="text-[10px] text-zinc-500 mt-1">IN PROGRESS</div>
+            </div>
+        </div>`;
+
+        if (refs.length === 0) {
+            html += '<p class="text-sm text-zinc-600 text-center py-8">No referrals yet.</p>';
+        } else {
+            html += `<table class="w-full text-sm">
+                <thead><tr class="text-[10px] text-zinc-500 tracking-widest border-b border-zinc-800">
+                    <th class="text-left pb-3">REFERRER</th>
+                    <th class="text-left pb-3">REFERRED</th>
+                    <th class="text-left pb-3">PROGRESS</th>
+                    <th class="text-left pb-3">STATUS</th>
+                </tr></thead><tbody>`;
+
+            refs.forEach(r => {
+                const pct   = Math.min(Math.round((r.hours / 7) * 100), 100);
+                const color = pct >= 100 ? 'bg-green-500' : pct >= 50 ? 'bg-yellow-500' : 'bg-indigo-500';
+                const badge = r.complete
+                    ? (r.reward_sent
+                        ? '<span class="text-[10px] px-2 py-0.5 rounded bg-zinc-700/50 text-zinc-400">SENT</span>'
+                        : '<span class="text-[10px] px-2 py-0.5 rounded bg-green-500/20 text-green-400 font-medium">REWARD PENDING</span>')
+                    : '<span class="text-[10px] px-2 py-0.5 rounded bg-zinc-700/50 text-zinc-500">IN PROGRESS</span>';
+
+                const hoursDisplay = r.hours >= 1
+                    ? `${r.hours}h`
+                    : `${Math.round(r.hours * 60)}m`;
+
+                html += `<tr class="border-b border-zinc-800/50 hover:bg-zinc-800/20">
+                    <td class="py-3 text-xs">${r.referrer||'—'}</td>
+                    <td class="py-3 text-xs">${r.referred||'—'}</td>
+                    <td class="py-3">
+                        <div class="flex items-center gap-2">
+                            <div class="w-24 h-1.5 bg-zinc-800 rounded-full overflow-hidden">
+                                <div class="h-full ${color} rounded-full transition-all" style="width:${pct}%"></div>
+                            </div>
+                            <span class="text-xs font-mono text-zinc-400">${hoursDisplay}/7h</span>
+                        </div>
+                    </td>
+                    <td class="py-3">${badge}</td>
+                </tr>`;
+            });
+            html += '</tbody></table>';
+        }
+
+        content.innerHTML = html;
 
     } else if (tab === 'updates') {
         const updates = await fetch('/admin/updates/all').then(r => r.json());
