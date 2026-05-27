@@ -219,25 +219,41 @@ def get_identity_history(device_id):
     ]
 
 
-def update_usage(device_id, hours_delta=None, minutes_delta=None):
-    """Accept minutes_delta (new) or hours_delta (legacy)."""
+def update_usage(device_id, hours_delta=None, minutes_delta=None,
+                 total_minutes=None):
+    """
+    Accept:
+      minutes_delta  — add this many minutes (regular ping)
+      hours_delta    — add this many hours (legacy)
+      total_minutes  — set absolute total (sync correction)
+    """
     conn = get_db()
     c    = conn.cursor()
     now  = datetime.now().isoformat()
 
-    if minutes_delta is not None:
-        hours_add = minutes_delta / 60.0
-    elif hours_delta is not None:
-        hours_add = hours_delta
+    if total_minutes is not None:
+        # Absolute sync — set total directly if server is behind
+        hours_total = total_minutes / 60.0
+        c.execute("""
+            UPDATE users
+            SET total_hours = GREATEST(total_hours, %s),
+                last_seen   = %s
+            WHERE device_id = %s
+        """, (hours_total, now, device_id))
     else:
-        hours_add = 0
+        if minutes_delta is not None:
+            hours_add = minutes_delta / 60.0
+        elif hours_delta is not None:
+            hours_add = hours_delta
+        else:
+            hours_add = 0
 
-    c.execute("""
-        UPDATE users
-        SET total_hours = total_hours + %s,
-            last_seen   = %s
-        WHERE device_id = %s
-    """, (hours_add, now, device_id))
+        c.execute("""
+            UPDATE users
+            SET total_hours = total_hours + %s,
+                last_seen   = %s
+            WHERE device_id = %s
+        """, (hours_add, now, device_id))
 
     # ── Referral progress tracking ──
     c.execute("""

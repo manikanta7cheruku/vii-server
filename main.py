@@ -37,6 +37,7 @@ class UsagePingRequest(BaseModel):
     device_id:      str
     hours_delta:    Optional[float] = None   # legacy
     minutes_delta:  Optional[float] = None   # new — preferred
+    total_minutes:  Optional[float] = None   # absolute sync
     email:          Optional[str]   = None
 
 
@@ -80,11 +81,11 @@ def register(req: RegisterRequest):
 def usage_ping(req: UsagePingRequest):
     if req.email:
         db.register_user(req.device_id, email=req.email)
-    # Accept minutes_delta (new) or hours_delta (legacy clients)
     return db.update_usage(
         req.device_id,
         hours_delta=req.hours_delta,
-        minutes_delta=getattr(req, "minutes_delta", None)
+        minutes_delta=req.minutes_delta,
+        total_minutes=req.total_minutes
     )
 
 
@@ -246,21 +247,33 @@ def clear_all_users():
 @app.delete("/admin/users/clean-ghosts")
 def clean_ghost_users():
     """
-    Remove ghost rows — users with 0 usage AND no name.
-    Safe to run anytime. Keeps all real users.
+    Remove ghost rows safely.
+    Ghosts = 0 usage AND (corrupted country OR created before setup complete).
+    Never deletes rows with real usage.
     """
     conn = db.get_db()
     c = conn.cursor()
 
-    # Delete rows where total_hours is 0 AND name is null or empty
+    # Step 1: Delete rows with 0 usage AND corrupted country field
+    # Corrupted country = non-ASCII characters = came from broken wizard state
     c.execute("""
         DELETE FROM users
         WHERE total_hours = 0
-        AND (name IS NULL OR name = '' OR name = '—')
+        AND country NOT IN ('Unknown', 'India', 'US', 'UK', 'Australia',
+                            'Canada', 'Singapore', 'UAE', 'Other')
+        AND country IS NOT NULL
     """)
-    deleted_nameless = c.rowcount
+    deleted_corrupted = c.rowcount
 
-    # Delete duplicate device_ids — keep only the row with most usage
+    # Step 2: Delete rows with 0 usage AND no email (truly anonymous)
+    c.execute("""
+        DELETE FROM users
+        WHERE total_hours = 0
+        AND (email IS NULL OR email = '')
+    """)
+    deleted_anonymous = c.rowcount
+
+    # Step 3: For same device_id appearing twice, keep highest usage row
     c.execute("""
         DELETE FROM users
         WHERE ctid NOT IN (
@@ -273,11 +286,15 @@ def clean_ghost_users():
 
     conn.commit()
     conn.close()
+
+    total = deleted_corrupted + deleted_anonymous + deleted_dupes
     return {
         "success": True,
-        "deleted_nameless": deleted_nameless,
+        "deleted_corrupted_country": deleted_corrupted,
+        "deleted_anonymous": deleted_anonymous,
         "deleted_duplicates": deleted_dupes,
-        "message": f"Cleaned {deleted_nameless + deleted_dupes} ghost rows"
+        "total_deleted": total,
+        "message": f"Cleaned {total} ghost rows"
     }
 
 
