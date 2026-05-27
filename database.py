@@ -42,6 +42,18 @@ def init_db():
         )
     """)
 
+    # ── Identity Change History ──
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS user_identity_history (
+            id         SERIAL PRIMARY KEY,
+            device_id  TEXT NOT NULL,
+            field      TEXT NOT NULL,
+            old_value  TEXT,
+            new_value  TEXT,
+            changed_at TEXT NOT NULL
+        )
+    """)
+
     # ── Referrals ──
     c.execute("""
         CREATE TABLE IF NOT EXISTS referrals (
@@ -124,6 +136,13 @@ def register_user(device_id, email=None, name=None,
     c    = conn.cursor()
     now  = datetime.now().isoformat()
 
+    # ── Get current values before update (for history tracking) ──
+    c.execute("""
+        SELECT name, email FROM users WHERE device_id = %s
+    """, (device_id,))
+    existing = c.fetchone()
+
+    # ── Upsert user ──
     c.execute("""
         INSERT INTO users
             (device_id, name, email, country, install_date, last_seen)
@@ -135,6 +154,26 @@ def register_user(device_id, email=None, name=None,
             last_seen = %s
     """, (device_id, name, email, country, now, now,
           name, email, country, now))
+
+    # ── Log identity changes if user already existed ──
+    if existing:
+        old_name, old_email = existing
+
+        # Log name change
+        if name and old_name and name.strip() != old_name.strip():
+            c.execute("""
+                INSERT INTO user_identity_history
+                    (device_id, field, old_value, new_value, changed_at)
+                VALUES (%s, %s, %s, %s, %s)
+            """, (device_id, "name", old_name, name, now))
+
+        # Log email change
+        if email and old_email and email.strip() != old_email.strip():
+            c.execute("""
+                INSERT INTO user_identity_history
+                    (device_id, field, old_value, new_value, changed_at)
+                VALUES (%s, %s, %s, %s, %s)
+            """, (device_id, "email", old_email, email, now))
 
     if referral_code and email:
         c.execute("""
@@ -148,6 +187,29 @@ def register_user(device_id, email=None, name=None,
     conn.commit()
     conn.close()
     return {"success": True}
+
+
+def get_identity_history(device_id):
+    """Get name/email change history for a device."""
+    conn = get_db()
+    c    = conn.cursor()
+    c.execute("""
+        SELECT field, old_value, new_value, changed_at
+        FROM user_identity_history
+        WHERE device_id = %s
+        ORDER BY changed_at DESC
+    """, (device_id,))
+    rows = c.fetchall()
+    conn.close()
+    return [
+        {
+            "field":      row[0],
+            "old_value":  row[1],
+            "new_value":  row[2],
+            "changed_at": row[3],
+        }
+        for row in rows
+    ]
 
 
 def update_usage(device_id, hours_delta=None, minutes_delta=None):
@@ -230,22 +292,29 @@ def get_all_users():
     conn = get_db()
     c    = conn.cursor()
     c.execute("""
-        SELECT device_id, name, email, country,
-               total_hours, license_tier, last_seen
-        FROM users ORDER BY last_seen DESC
+        SELECT u.device_id, u.name, u.email, u.country,
+               u.total_hours, u.license_tier, u.last_seen,
+               COUNT(h.id) as change_count
+        FROM users u
+        LEFT JOIN user_identity_history h ON h.device_id = u.device_id
+        GROUP BY u.device_id, u.name, u.email, u.country,
+                 u.total_hours, u.license_tier, u.last_seen
+        ORDER BY u.last_seen DESC
     """)
     users = []
     for row in c.fetchall():
         total_mins = (row[4] or 0) * 60
         users.append({
-            "device_id":   (row[0][:12] + "...") if row[0] else None,
-            "name":        row[1] or "—",
-            "email":       row[2] or "—",
-            "country":     row[3] or "—",
-            "total_hours": round(row[4] or 0, 1),
-            "total_time":  _fmt(total_mins),
-            "tier":        row[5] or "free",
-            "last_seen":   row[6],
+            "device_id":    row[0],
+            "device_short": (row[0][:12] + "...") if row[0] else None,
+            "name":         row[1] or "—",
+            "email":        row[2] or "—",
+            "country":      row[3] or "—",
+            "total_hours":  round(row[4] or 0, 1),
+            "total_time":   _fmt(total_mins),
+            "tier":         row[5] or "free",
+            "last_seen":    row[6],
+            "change_count": int(row[7] or 0),
         })
     conn.close()
     return users

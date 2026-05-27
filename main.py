@@ -175,6 +175,12 @@ def admin_users():
     return db.get_all_users()
 
 
+@app.get("/admin/users/{device_id}/history")
+def admin_user_history(device_id: str):
+    """Get name/email change history for a specific device."""
+    return db.get_identity_history(device_id)
+
+
 @app.get("/admin/referrals")
 def admin_referrals():
     return db.get_all_referrals()
@@ -364,7 +370,19 @@ async function showTab(tab) {
 
     if (tab === 'users') {
         const users = await fetch('/admin/users').then(r => r.json());
-        let html = `<table class="w-full text-sm">
+        let html = `
+        <!-- History modal -->
+        <div id="history-modal" class="hidden fixed inset-0 bg-black/70 z-50 flex items-center justify-center p-6">
+            <div class="bg-zinc-900 border border-zinc-700 rounded-xl w-full max-w-lg p-6 space-y-4">
+                <div class="flex items-center justify-between">
+                    <h3 class="text-sm font-semibold text-zinc-200">Identity Change History</h3>
+                    <button onclick="closeHistory()" class="text-zinc-500 hover:text-zinc-200 text-lg">✕</button>
+                </div>
+                <div id="history-content" class="space-y-2 max-h-80 overflow-y-auto"></div>
+            </div>
+        </div>
+
+        <table class="w-full text-sm">
             <thead><tr class="text-[10px] text-zinc-500 tracking-widest border-b border-zinc-800">
                 <th class="text-left pb-3">DEVICE</th>
                 <th class="text-left pb-3">NAME</th>
@@ -372,10 +390,18 @@ async function showTab(tab) {
                 <th class="text-left pb-3">TIME USED</th>
                 <th class="text-left pb-3">TIER</th>
                 <th class="text-left pb-3">LAST SEEN</th>
+                <th class="text-left pb-3">CHANGES</th>
             </tr></thead><tbody>`;
         users.forEach(u => {
+            const changesBadge = u.change_count > 0
+                ? `<button onclick="showHistory('${u.device_id}')"
+                    class="text-[10px] px-2 py-0.5 rounded bg-yellow-500/20 text-yellow-400 hover:bg-yellow-500/30 transition-colors">
+                    ${u.change_count} change${u.change_count > 1 ? 's' : ''}
+                  </button>`
+                : `<span class="text-[10px] text-zinc-600">—</span>`;
+
             html += `<tr class="border-b border-zinc-800/50 hover:bg-zinc-800/20">
-                <td class="py-3 font-mono text-xs text-zinc-500">${u.device_id}</td>
+                <td class="py-3 font-mono text-xs text-zinc-500">${u.device_short}</td>
                 <td class="py-3 font-medium">${u.name}</td>
                 <td class="py-3 text-zinc-300">${u.email}</td>
                 <td class="py-3 font-mono text-indigo-400">${u.total_time}</td>
@@ -386,7 +412,8 @@ async function showTab(tab) {
                                               'bg-zinc-700/50 text-zinc-400'
                     }">${u.tier.toUpperCase()}</span>
                 </td>
-                <td class="py-3 text-zinc-500 text-xs">${u.last_seen || '—'}</td>
+                <td class="py-3 text-zinc-500 text-xs">${(u.last_seen||'').slice(0,16).replace('T',' ')}</td>
+                <td class="py-3">${changesBadge}</td>
             </tr>`;
         });
         content.innerHTML = html + '</tbody></table>';
@@ -658,6 +685,46 @@ async function toggleDeliver(version, state) {
 async function markSent(code) {
     await fetch('/admin/rewards/sent/' + code, {method: 'POST'});
     load();
+}
+
+async function showHistory(deviceId) {
+    const modal = document.getElementById('history-modal');
+    const content = document.getElementById('history-content');
+    content.innerHTML = '<p class="text-xs text-zinc-500">Loading...</p>';
+    modal.classList.remove('hidden');
+
+    try {
+        const history = await fetch('/admin/users/' + encodeURIComponent(deviceId) + '/history').then(r => r.json());
+
+        if (!history || history.length === 0) {
+            content.innerHTML = '<p class="text-xs text-zinc-500 text-center py-4">No changes recorded yet.</p>';
+            return;
+        }
+
+        content.innerHTML = history.map(h => `
+            <div class="bg-zinc-800 rounded-lg p-3 space-y-1">
+                <div class="flex items-center justify-between">
+                    <span class="text-[10px] px-2 py-0.5 rounded font-medium ${
+                        h.field === 'name'
+                            ? 'bg-indigo-500/20 text-indigo-300'
+                            : 'bg-green-500/20 text-green-300'
+                    }">${h.field.toUpperCase()} CHANGED</span>
+                    <span class="text-[10px] text-zinc-500 font-mono">${(h.changed_at||'').slice(0,16).replace('T',' ')}</span>
+                </div>
+                <div class="flex items-center gap-2 text-xs">
+                    <span class="text-zinc-500 line-through">${h.old_value || '—'}</span>
+                    <span class="text-zinc-600">→</span>
+                    <span class="text-zinc-200 font-medium">${h.new_value || '—'}</span>
+                </div>
+            </div>
+        `).join('');
+    } catch(e) {
+        content.innerHTML = '<p class="text-xs text-red-400">Failed to load history.</p>';
+    }
+}
+
+function closeHistory() {
+    document.getElementById('history-modal').classList.add('hidden');
 }
 
 load();
