@@ -225,14 +225,15 @@ def update_usage(device_id, hours_delta=None, minutes_delta=None,
     Accept:
       minutes_delta  — add this many minutes (regular ping)
       hours_delta    — add this many hours (legacy)
-      total_minutes  — set absolute total (sync correction)
+      total_minutes  — set absolute total (sync correction on startup)
     """
     conn = get_db()
     c    = conn.cursor()
     now  = datetime.now().isoformat()
 
     if total_minutes is not None:
-        # Absolute sync — set total directly if server is behind
+        # Absolute sync — only update if local total is GREATER than server
+        # GREATEST() ensures server never goes backwards
         hours_total = total_minutes / 60.0
         c.execute("""
             UPDATE users
@@ -240,6 +241,7 @@ def update_usage(device_id, hours_delta=None, minutes_delta=None,
                 last_seen   = %s
             WHERE device_id = %s
         """, (hours_total, now, device_id))
+        print(f"[DB] Absolute sync: {round(hours_total, 2)}h for {device_id[:8]}")
     else:
         if minutes_delta is not None:
             hours_add = minutes_delta / 60.0
@@ -248,12 +250,13 @@ def update_usage(device_id, hours_delta=None, minutes_delta=None,
         else:
             hours_add = 0
 
-        c.execute("""
-            UPDATE users
-            SET total_hours = total_hours + %s,
-                last_seen   = %s
-            WHERE device_id = %s
-        """, (hours_add, now, device_id))
+        if hours_add > 0:
+            c.execute("""
+                UPDATE users
+                SET total_hours = total_hours + %s,
+                    last_seen   = %s
+                WHERE device_id = %s
+            """, (hours_add, now, device_id))
 
     # ── Referral progress tracking ──
     c.execute("""

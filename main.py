@@ -35,9 +35,9 @@ class RegisterRequest(BaseModel):
 
 class UsagePingRequest(BaseModel):
     device_id:      str
-    hours_delta:    Optional[float] = None   # legacy
-    minutes_delta:  Optional[float] = None   # new — preferred
-    total_minutes:  Optional[float] = None   # absolute sync
+    hours_delta:    Optional[float] = None
+    minutes_delta:  Optional[float] = None
+    total_minutes:  Optional[float] = None
     email:          Optional[str]   = None
 
 
