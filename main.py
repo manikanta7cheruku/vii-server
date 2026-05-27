@@ -166,6 +166,18 @@ def get_latest_update(tier: str = "free", current_version: str = "0.0.0"):
 # ADMIN API
 # =============================================================================
 
+@app.delete("/admin/users/delete-zero-usage")
+def delete_zero_usage():
+    """Delete all users with zero usage. Safe — real users always have usage."""
+    conn = db.get_db()
+    c = conn.cursor()
+    c.execute("DELETE FROM users WHERE total_hours = 0 OR total_hours IS NULL")
+    deleted = c.rowcount
+    conn.commit()
+    conn.close()
+    return {"success": True, "deleted": deleted, "message": f"Deleted {deleted} zero-usage rows"}
+
+
 @app.get("/admin/stats")
 def admin_stats():
     return db.get_stats()
@@ -246,6 +258,60 @@ def clear_all_users():
 
 @app.delete("/admin/users/clean-ghosts")
 def clean_ghost_users():
+    """
+    Remove ghost rows safely.
+    Ghosts = 0 usage AND (corrupted country OR created before setup complete).
+    Never deletes rows with real usage.
+    """
+    conn = db.get_db()
+    c = conn.cursor()
+
+    # Step 1: Delete ALL rows with 0 total_hours that are not real users
+    # Real users always accumulate some usage
+    c.execute("""
+        DELETE FROM users
+        WHERE total_hours = 0
+        OR total_hours IS NULL
+    """)
+    deleted_zero = c.rowcount
+
+    conn.commit()
+    conn.close()
+
+    return {
+        "success": True,
+        "deleted": deleted_zero,
+        "message": f"Deleted {deleted_zero} zero-usage rows"
+    }
+
+
+@app.get("/admin/users/raw")
+def get_raw_users():
+    """Show exact raw data for debugging."""
+    conn = db.get_db()
+    c = conn.cursor()
+    c.execute("""
+        SELECT device_id, name, email, country, total_hours, last_seen
+        FROM users
+        ORDER BY total_hours DESC
+    """)
+    rows = c.fetchall()
+    conn.close()
+    return [
+        {
+            "device_id": row[0],
+            "name": row[1],
+            "email": row[2],
+            "country": repr(row[3]),
+            "total_hours": row[4],
+            "last_seen": row[5]
+        }
+        for row in rows
+    ]
+
+
+@app.delete("/admin/users/clean-ghosts-real")
+def clean_ghost_users_real():
     """
     Remove ghost rows safely.
     Ghosts = 0 usage AND (corrupted country OR created before setup complete).
