@@ -485,6 +485,10 @@ def publish_update(version, download_url, size_mb, changelog,
 
     c.execute("UPDATE updates SET is_active = 0")
 
+    # Convert booleans to integers for PostgreSQL INTEGER columns
+    is_critical_int  = 1 if is_critical  else 0
+    auto_deliver_int = 1 if auto_deliver else 0
+
     c.execute("""
         INSERT INTO updates
             (version, download_url, size_mb, changelog, target_tier,
@@ -503,9 +507,9 @@ def publish_update(version, download_url, size_mb, changelog,
             published_at  = %s
     """, (
         version, download_url, size_mb, changelog, target_tier,
-        is_critical, download_mode, auto_deliver, now, now,
+        is_critical_int, download_mode, auto_deliver_int, now, now,
         download_url, size_mb, changelog, target_tier,
-        is_critical, download_mode, auto_deliver, now
+        is_critical_int, download_mode, auto_deliver_int, now
     ))
 
     conn.commit()
