@@ -210,10 +210,81 @@ def admin_mark_sent(code: str):
     return {"success": True}
 
 
-@app.post("/admin/license/generate")
-def generate_license(email: str, tier: str = "pro", plan_type: str = "monthly"):
-    key = f"VII-{secrets.token_hex(4).upper()}-{secrets.token_hex(4).upper()}"
-    return {"license_key": key, "email": email, "tier": tier, "plan_type": plan_type}
+# ── License request models ──
+class LicenseCreateRequest(BaseModel):
+    license_key: str
+    email:       str
+    tier:        str = "pro"
+    plan_type:   str = "monthly"
+    expires_at:  Optional[str] = None
+
+
+class LicenseValidateRequest(BaseModel):
+    license_key: str
+    device_id:   Optional[str] = None
+
+
+# ── Admin: create key (called by admin_tools.py) ──
+@app.post("/admin/license/create")
+def admin_create_license(req: LicenseCreateRequest):
+    """
+    Create a license key in PostgreSQL.
+    Called by: python admin_tools.py custom LAUNCH-2025 ultimate monthly
+    """
+    key = req.license_key.upper().strip()
+    if not key.startswith("VII-"):
+        raise HTTPException(400, "Key must start with VII-")
+
+    result = db.create_license(
+        license_key=key,
+        email=req.email,
+        tier=req.tier,
+        plan_type=req.plan_type,
+        expires_at=req.expires_at
+    )
+    return {
+        "success":     True,
+        "license_key": result,
+        "tier":        req.tier,
+        "plan_type":   req.plan_type,
+        "expires_at":  req.expires_at
+    }
+
+
+# ── Public: validate key (called by Seven desktop app) ──
+@app.post("/api/license/validate")
+def api_validate_license(req: LicenseValidateRequest):
+    """
+    Seven desktop calls this when user enters a key.
+    Returns tier + expiry if valid.
+    """
+    key    = req.license_key.upper().strip()
+    result = db.validate_license(key)
+
+    if not result:
+        raise HTTPException(404, "License key not found")
+
+    if not result.get("valid"):
+        raise HTTPException(400, result.get("reason", "Invalid license"))
+
+    # Link device if provided
+    if req.device_id and result.get("valid"):
+        db.activate_license_on_device(key, req.device_id)
+
+    return result
+
+
+# ── Admin: list all keys ──
+@app.get("/admin/licenses")
+def admin_list_licenses():
+    return db.get_all_licenses()
+
+
+# ── Admin: revoke key ──
+@app.delete("/admin/licenses/{license_key}")
+def admin_revoke_license(license_key: str):
+    db.revoke_license(license_key.upper())
+    return {"success": True, "revoked": license_key.upper()}
 
 
 @app.post("/admin/updates/publish")

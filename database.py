@@ -474,6 +474,142 @@ def get_referral_stats(email=None, device_id=None):
 
 
 # ─────────────────────────────────────────────
+# LICENSES
+# ─────────────────────────────────────────────
+
+def create_license(license_key, email, tier, plan_type, expires_at=None):
+    """Create a license key in PostgreSQL. Called by admin_tools.py."""
+    conn = get_db()
+    c    = conn.cursor()
+    now  = datetime.now().isoformat()
+
+    c.execute("""
+        INSERT INTO licenses
+            (license_key, email, tier, plan_type, created_at, expires_at, is_active)
+        VALUES (%s, %s, %s, %s, %s, %s, 1)
+        ON CONFLICT (license_key) DO UPDATE SET
+            email      = %s,
+            tier       = %s,
+            plan_type  = %s,
+            expires_at = %s,
+            is_active  = 1
+    """, (license_key, email, tier, plan_type, now, expires_at,
+          email, tier, plan_type, expires_at))
+
+    conn.commit()
+    conn.close()
+    return license_key
+
+
+def validate_license(license_key):
+    """
+    Check if a license key exists and is valid.
+    Returns full license info or None.
+    """
+    conn = get_db()
+    c    = conn.cursor()
+
+    c.execute("""
+        SELECT license_key, email, tier, plan_type, expires_at, is_active
+        FROM licenses
+        WHERE license_key = %s
+    """, (license_key,))
+
+    row = c.fetchone()
+    conn.close()
+
+    if not row:
+        return None
+
+    license_key, email, tier, plan_type, expires_at, is_active = row
+
+    if not is_active:
+        return {"valid": False, "reason": "revoked"}
+
+    # Check expiry
+    if expires_at:
+        try:
+            expiry = datetime.fromisoformat(expires_at)
+            if datetime.now() > expiry:
+                return {"valid": False, "reason": "expired", "expires_at": expires_at}
+            days_left = (expiry - datetime.now()).days
+        except Exception:
+            days_left = None
+    else:
+        days_left = None
+
+    return {
+        "valid":            True,
+        "license_key":      license_key,
+        "email":            email,
+        "tier":             tier,
+        "plan_type":        plan_type,
+        "expires_at":       expires_at,
+        "days_until_expiry": days_left
+    }
+
+
+def activate_license_on_device(license_key, device_id):
+    """
+    Link a device_id to a license key.
+    Tracks activations in the users table (license_tier column).
+    """
+    conn = get_db()
+    c    = conn.cursor()
+    now  = datetime.now().isoformat()
+
+    # Update user's tier
+    c.execute("""
+        UPDATE users
+        SET license_tier = (
+            SELECT tier FROM licenses WHERE license_key = %s
+        )
+        WHERE device_id = %s
+    """, (license_key, device_id))
+
+    conn.commit()
+    conn.close()
+    return True
+
+
+def revoke_license(license_key):
+    """Deactivate a license key."""
+    conn = get_db()
+    c    = conn.cursor()
+    c.execute(
+        "UPDATE licenses SET is_active = 0 WHERE license_key = %s",
+        (license_key,)
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_all_licenses():
+    """Get all licenses for admin dashboard."""
+    conn = get_db()
+    c    = conn.cursor()
+    c.execute("""
+        SELECT license_key, email, tier, plan_type, created_at, expires_at, is_active
+        FROM licenses
+        ORDER BY created_at DESC
+    """)
+    rows = c.fetchall()
+    conn.close()
+    return [
+        {
+            "key":        row[0],
+            "email":      row[1],
+            "tier":       row[2],
+            "plan_type":  row[3],
+            "created_at": (row[4] or '')[:10],
+            "expires_at": (row[5] or '')[:10] if row[5] else "Lifetime",
+            "active":     bool(row[6])
+        }
+        for row in rows
+    ]
+
+
+# ─────────────────────────────────────────────
 # UPDATES
 # ─────────────────────────────────────────────
 
