@@ -132,6 +132,13 @@ def _fmt(total_minutes):
 
 def register_user(device_id, email=None, name=None,
                   country=None, referral_code=None):
+
+    # ── Reject anonymous registrations ──
+    # Don't create a row unless we have at least a name OR email.
+    # This prevents ghost rows from pre-setup pings.
+    if not name and not email:
+        return {"success": False, "reason": "no_identity"}
+
     conn = get_db()
     c    = conn.cursor()
     now  = datetime.now().isoformat()

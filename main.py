@@ -243,6 +243,44 @@ def clear_all_users():
     return {"success": True, "message": "All users cleared"}
 
 
+@app.delete("/admin/users/clean-ghosts")
+def clean_ghost_users():
+    """
+    Remove ghost rows — users with 0 usage AND no name.
+    Safe to run anytime. Keeps all real users.
+    """
+    conn = db.get_db()
+    c = conn.cursor()
+
+    # Delete rows where total_hours is 0 AND name is null or empty
+    c.execute("""
+        DELETE FROM users
+        WHERE total_hours = 0
+        AND (name IS NULL OR name = '' OR name = '—')
+    """)
+    deleted_nameless = c.rowcount
+
+    # Delete duplicate device_ids — keep only the row with most usage
+    c.execute("""
+        DELETE FROM users
+        WHERE ctid NOT IN (
+            SELECT DISTINCT ON (device_id) ctid
+            FROM users
+            ORDER BY device_id, total_hours DESC
+        )
+    """)
+    deleted_dupes = c.rowcount
+
+    conn.commit()
+    conn.close()
+    return {
+        "success": True,
+        "deleted_nameless": deleted_nameless,
+        "deleted_duplicates": deleted_dupes,
+        "message": f"Cleaned {deleted_nameless + deleted_dupes} ghost rows"
+    }
+
+
 @app.get("/health")
 def health():
     return {"status": "ok", "time": datetime.now().isoformat()}
