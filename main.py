@@ -178,6 +178,22 @@ def delete_zero_usage():
     return {"success": True, "deleted": deleted, "message": f"Deleted {deleted} zero-usage rows"}
 
 
+@app.get("/api/device/{device_id}")
+def get_device(device_id: str):
+    """Look up existing identity for a device. Used on reinstall."""
+    conn = db.get_db()
+    c = conn.cursor()
+    c.execute("""
+        SELECT name, email FROM users
+        WHERE device_id = %s
+    """, (device_id,))
+    row = c.fetchone()
+    conn.close()
+    if row and (row[0] or row[1]):
+        return {"found": True, "name": row[0], "email": row[1]}
+    return {"found": False}
+
+
 @app.get("/admin/stats")
 def admin_stats():
     return db.get_stats()
