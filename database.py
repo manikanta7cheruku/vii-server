@@ -332,7 +332,7 @@ def get_all_users():
         total_mins = (row[4] or 0) * 60
         users.append({
             "device_id":    row[0],
-            "device_short": (row[0][:12] + "...") if row[0] else None,
+            "device_short": (row[0][:12] + "...") if row[0] and len(row[0]) > 12 else row[0],
             "name":         row[1] or "—",
             "email":        row[2] or "—",
             "country":      row[3] or "—",
