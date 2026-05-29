@@ -936,7 +936,30 @@ function closeHistory() {
 }
 
 load();
-setInterval(load, 30000);
+
+// Only auto-refresh stats and pending — NOT the active tab content
+setInterval(async () => {
+    // Don't refresh if user is typing in updates form
+    const activeInputs = document.querySelectorAll('input:focus, textarea:focus, select:focus');
+    if (activeInputs.length > 0) return;
+    
+    // Only refresh stats row and pending banner
+    const stats = await fetch('/admin/stats').then(r => r.json());
+    document.getElementById('stats').innerHTML = `
+        <div class="bg-zinc-900 border border-zinc-800 rounded-xl p-5">
+            <div class="text-[10px] text-zinc-500 tracking-widest mb-1">TOTAL USERS</div>
+            <div class="text-3xl font-mono font-bold">${stats.total_users}</div>
+        </div>
+        <div class="bg-zinc-900 border border-zinc-800 rounded-xl p-5">
+            <div class="text-[10px] text-zinc-500 tracking-widest mb-1">ACTIVE (7D)</div>
+            <div class="text-3xl font-mono font-bold text-green-400">${stats.active_7d}</div>
+        </div>
+        <div class="bg-zinc-900 border border-zinc-800 rounded-xl p-5">
+            <div class="text-[10px] text-zinc-500 tracking-widest mb-1">TOTAL TIME</div>
+            <div class="text-3xl font-mono font-bold text-indigo-400">${stats.total_time}</div>
+        </div>
+    `;
+}, 30000);
 </script>
 </body>
 </html>
