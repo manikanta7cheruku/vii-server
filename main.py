@@ -805,6 +805,7 @@ async function showTab(tab) {
                             <th class="text-left pb-3">AUTO-DELIVER</th>
                             <th class="text-left pb-3">STATUS</th>
                             <th class="text-left pb-3">PUBLISHED</th>
+                            <th class="text-left pb-3">CHANGELOG</th>
                         </tr></thead><tbody>
                         ${updates.map(u => `
                             <tr class="border-b border-zinc-800/50">
@@ -826,6 +827,9 @@ async function showTab(tab) {
                                     ? '<span class="text-[10px] px-2 py-0.5 rounded bg-green-500/20 text-green-400">LIVE</span>'
                                     : '<span class="text-[10px] px-2 py-0.5 rounded bg-zinc-700/50 text-zinc-500">ARCHIVED</span>'}</td>
                                 <td class="py-3 text-zinc-500 text-xs">${(u.published_at||'').slice(0,10)}</td>
+                                <td class="py-3 text-zinc-400 text-xs max-w-xs">
+                                    ${u.changelog ? JSON.parse(u.changelog).map(c => '• ' + c).join('<br/>') : '—'}
+                                </td>
                             </tr>`).join('')}
                         </tbody></table>`
                 }
