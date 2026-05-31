@@ -686,7 +686,7 @@ def get_all_updates():
     c    = conn.cursor()
     c.execute("""
         SELECT version, target_tier, is_critical, download_mode,
-               auto_deliver, is_active, published_at
+               auto_deliver, is_active, published_at, changelog
         FROM updates ORDER BY published_at DESC
     """)
     updates = []
@@ -699,6 +699,7 @@ def get_all_updates():
             "auto_deliver":  bool(row[4]),
             "is_active":     bool(row[5]),
             "published_at":  row[6],
+            "changelog":     row[7] or "[]",
         })
     conn.close()
     return updates
