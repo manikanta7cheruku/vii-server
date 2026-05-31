@@ -77,6 +77,25 @@ def register(req: RegisterRequest):
     )
 
 
+class LicenseSyncRequest(BaseModel):
+    device_id:    str
+    license_key:  str
+    license_tier: str
+
+
+@app.post("/api/license/sync-tier")
+def sync_license_tier(req: LicenseSyncRequest):
+    """
+    Called by Seven desktop when user activates a license.
+    Updates license_tier in users table so admin dashboard shows correct tier.
+    """
+    valid_tiers = ["free", "pro", "ultimate"]
+    if req.license_tier not in valid_tiers:
+        raise HTTPException(status_code=400, detail="Invalid tier")
+
+    return db.sync_license_tier(req.device_id, req.license_key, req.license_tier)
+
+
 @app.post("/api/usage/ping")
 def usage_ping(req: UsagePingRequest):
     if req.email:

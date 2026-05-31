@@ -715,5 +715,23 @@ def toggle_auto_deliver(version, state):
     conn.commit()
     conn.close()
 
+def sync_license_tier(device_id, license_key, license_tier):
+    """Update license_tier in users table when user activates a license."""
+    conn = get_db()
+    c    = conn.cursor()
+    now  = datetime.now().isoformat()
+
+    c.execute("""
+        UPDATE users
+        SET license_tier = %s,
+            last_seen    = %s
+        WHERE device_id = %s
+    """, (license_tier, now, device_id))
+
+    conn.commit()
+    conn.close()
+    return {"success": True, "tier": license_tier}
+
 
 init_db()
+print("[DB] PostgreSQL initialized ✓")
