@@ -163,8 +163,8 @@ def get_latest_update(tier: str = "free", current_version: str = "0.0.0"):
     # Compare versions — strips any suffix like "-test" or "-beta"
     def parse_version(v):
         try:
-            # Remove suffix like -test, -beta, -rc1
-            clean = v.strip().split("-")[0]
+            # Remove v prefix and any suffix like -test, -beta, -rc1
+            clean = v.strip().lstrip("v").lstrip("V").split("-")[0]
             return [int(x) for x in clean.split(".")]
         except Exception:
             return [0, 0, 0]

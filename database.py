@@ -619,6 +619,9 @@ def publish_update(version, download_url, size_mb, changelog,
     c    = conn.cursor()
     now  = datetime.now().isoformat()
 
+    # Strip v prefix — always store clean version number
+    version = version.strip().lstrip("v").lstrip("V")
+
     c.execute("UPDATE updates SET is_active = 0")
 
     # Convert booleans to integers for PostgreSQL INTEGER columns
@@ -684,11 +687,22 @@ def get_latest_update():
 def get_all_updates():
     conn = get_db()
     c    = conn.cursor()
-    c.execute("""
-        SELECT version, target_tier, is_critical, download_mode,
-               auto_deliver, is_active, published_at, changelog
-        FROM updates ORDER BY published_at DESC
-    """)
+    try:
+        c.execute("""
+            SELECT version, target_tier, is_critical, download_mode,
+                   auto_deliver, is_active, published_at, changelog
+            FROM updates ORDER BY published_at DESC
+        """)
+        has_changelog = True
+    except Exception:
+        # changelog column might not exist in older schema
+        c.execute("""
+            SELECT version, target_tier, is_critical, download_mode,
+                   auto_deliver, is_active, published_at
+            FROM updates ORDER BY published_at DESC
+        """)
+        has_changelog = False
+
     updates = []
     for row in c.fetchall():
         updates.append({
@@ -699,7 +713,7 @@ def get_all_updates():
             "auto_deliver":  bool(row[4]),
             "is_active":     bool(row[5]),
             "published_at":  row[6],
-            "changelog":     row[7] or "[]",
+            "changelog":     (row[7] or "[]") if has_changelog else "[]",
         })
     conn.close()
     return updates
