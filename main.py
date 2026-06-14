@@ -470,6 +470,207 @@ def clean_ghost_users_real():
     }
 
 
+# ─────────────────────────────────────────────
+# PAYMENT — Razorpay
+# ─────────────────────────────────────────────
+
+import hmac
+import hashlib
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+
+RAZORPAY_KEY_ID     = os.environ.get("RAZORPAY_KEY_ID", "")
+RAZORPAY_KEY_SECRET = os.environ.get("RAZORPAY_KEY_SECRET", "")
+GMAIL_USER          = os.environ.get("GMAIL_USER", "")
+GMAIL_APP_PASSWORD  = os.environ.get("GMAIL_APP_PASSWORD", "")
+
+# Plan pricing in paise (1 INR = 100 paise)
+PLAN_PRICES = {
+    "pro_monthly":       9900,    # ₹99
+    "pro_yearly":        69900,   # ₹699
+    "pro_lifetime":      129900,  # ₹1299
+    "ultimate_monthly":  19900,   # ₹199
+    "ultimate_yearly":   99900,   # ₹999
+    "ultimate_lifetime": 199900,  # ₹1999
+}
+
+PLAN_NAMES = {
+    "pro_monthly":       ("pro",      "monthly"),
+    "pro_yearly":        ("pro",      "yearly"),
+    "pro_lifetime":      ("pro",      "lifetime"),
+    "ultimate_monthly":  ("ultimate", "monthly"),
+    "ultimate_yearly":   ("ultimate", "yearly"),
+    "ultimate_lifetime": ("ultimate", "lifetime"),
+}
+
+
+class CreateOrderRequest(BaseModel):
+    plan_id: str
+    email:   str
+
+
+class VerifyPaymentRequest(BaseModel):
+    razorpay_order_id:   str
+    razorpay_payment_id: str
+    razorpay_signature:  str
+    plan_id:             str
+    email:               str
+
+
+def _generate_license_key(tier: str, plan_type: str) -> str:
+    """Generate a new license key and save to DB."""
+    import secrets as _sec
+    key = f"VII-{_sec.token_hex(4).upper()}-{_sec.token_hex(4).upper()}"
+    db.publish_license_to_db(key, tier, plan_type)
+    return key
+
+
+def _send_license_email(email: str, key: str, tier: str, plan_type: str):
+    """Send license key to user via Gmail."""
+    if not GMAIL_USER or not GMAIL_APP_PASSWORD:
+        print(f"[EMAIL] Skipping email — Gmail not configured")
+        print(f"[EMAIL] Key for {email}: {key}")
+        return
+
+    try:
+        msg = MIMEMultipart("alternative")
+        msg["Subject"] = f"Your Seven {tier.upper()} License Key"
+        msg["From"]    = GMAIL_USER
+        msg["To"]      = email
+
+        if plan_type == "lifetime":
+            expiry_text = "Never expires — Lifetime access"
+        elif plan_type == "yearly":
+            expiry_text = "Valid for 1 year"
+        else:
+            expiry_text = "Valid for 1 month"
+
+        body = f"""
+Hi there!
+
+Thank you for purchasing Seven {tier.upper()}!
+
+Your license key:
+
+{key}
+
+Valid: {expiry_text}
+
+To activate:
+1. Open Seven
+2. Go to Plans page
+3. Paste the key and click Activate
+
+Enjoy Seven!
+
+— Seven Team
+        """
+
+        msg.attach(MIMEText(body, "plain"))
+
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+            server.login(GMAIL_USER, GMAIL_APP_PASSWORD)
+            server.sendmail(GMAIL_USER, email, msg.as_string())
+
+        print(f"[EMAIL] Sent license to {email}")
+    except Exception as e:
+        print(f"[EMAIL] Failed to send: {e}")
+
+
+@app.post("/api/payment/create-order")
+def create_order(req: CreateOrderRequest):
+    """
+    Create a Razorpay order.
+    Called by Seven frontend before showing checkout.
+    """
+    if req.plan_id not in PLAN_PRICES:
+        raise HTTPException(status_code=400, detail="Invalid plan")
+
+    if not RAZORPAY_KEY_ID or not RAZORPAY_KEY_SECRET:
+        raise HTTPException(status_code=500, detail="Payment not configured")
+
+    try:
+        import razorpay
+        client = razorpay.Client(auth=(RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET))
+
+        amount = PLAN_PRICES[req.plan_id]
+        order  = client.order.create({
+            "amount":   amount,
+            "currency": "INR",
+            "notes": {
+                "email":   req.email,
+                "plan_id": req.plan_id,
+            }
+        })
+
+        return {
+            "order_id":   order["id"],
+            "amount":     amount,
+            "currency":   "INR",
+            "key_id":     RAZORPAY_KEY_ID,
+            "plan_id":    req.plan_id,
+            "email":      req.email,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/payment/verify")
+def verify_payment(req: VerifyPaymentRequest):
+    """
+    Verify Razorpay payment signature.
+    Called by frontend after user completes payment.
+    Generates and emails license key.
+    """
+    if not RAZORPAY_KEY_SECRET:
+        raise HTTPException(status_code=500, detail="Payment not configured")
+
+    # Verify signature
+    body     = f"{req.razorpay_order_id}|{req.razorpay_payment_id}"
+    expected = hmac.new(
+        RAZORPAY_KEY_SECRET.encode("utf-8"),
+        body.encode("utf-8"),
+        hashlib.sha256
+    ).hexdigest()
+
+    if expected != req.razorpay_signature:
+        raise HTTPException(status_code=400, detail="Payment verification failed")
+
+    # Generate license key
+    tier, plan_type = PLAN_NAMES.get(req.plan_id, ("pro", "monthly"))
+    key = _generate_license_key(tier, plan_type)
+
+    # Send email
+    _send_license_email(req.email, key, tier, plan_type)
+
+    # Save transaction for admin dashboard
+    db.save_transaction(
+            order_id     = req.razorpay_order_id,
+            payment_id   = req.razorpay_payment_id,
+            email        = req.email,
+            plan_id      = req.plan_id,
+            tier         = tier,
+            plan_type    = plan_type,
+            amount_paise = PLAN_PRICES.get(req.plan_id, 0),
+            license_key  = key
+        )
+
+    return {
+            "success":     True,
+            "license_key": key,
+            "tier":        tier,
+            "plan_type":   plan_type,
+            "message":     f"License key sent to {req.email}"
+        }
+
+
+@app.get("/admin/transactions")
+def admin_transactions():
+    """Get all payment transactions for admin dashboard."""
+    return db.get_all_transactions()
+
+
 @app.get("/health")
 def health():
     return {"status": "ok", "time": datetime.now().isoformat()}

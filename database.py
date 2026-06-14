@@ -747,5 +747,117 @@ def sync_license_tier(device_id, license_key, license_tier):
     return {"success": True, "tier": license_tier}
 
 
+def publish_license_to_db(license_key: str, tier: str, plan_type: str):
+    """Save a generated license key to the licenses table."""
+    from datetime import timedelta
+    conn = get_db()
+    c    = conn.cursor()
+    now  = datetime.now().isoformat()
+
+    if plan_type == "monthly":
+        expires_at = (datetime.now() + timedelta(days=30)).isoformat()
+    elif plan_type == "yearly":
+        expires_at = (datetime.now() + timedelta(days=365)).isoformat()
+    else:
+        expires_at = None
+
+    c.execute("""
+        INSERT INTO licenses (license_key, email, tier, plan_type, created_at, expires_at, is_active)
+        VALUES (%s, %s, %s, %s, %s, %s, 1)
+        ON CONFLICT (license_key) DO NOTHING
+    """, (license_key, "purchased@razorpay", tier, plan_type, now, expires_at))
+
+    conn.commit()
+    conn.close()
+    return license_key
+
+
+def save_transaction(order_id, payment_id, email, plan_id, tier, plan_type, amount_paise, license_key):
+    """Save payment transaction to database."""
+    conn = get_db()
+    c    = conn.cursor()
+    now  = datetime.now().isoformat()
+
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS transactions (
+            id          SERIAL PRIMARY KEY,
+            order_id    TEXT UNIQUE,
+            payment_id  TEXT,
+            email       TEXT,
+            plan_id     TEXT,
+            tier        TEXT,
+            plan_type   TEXT,
+            amount_inr  REAL,
+            license_key TEXT,
+            created_at  TEXT
+        )
+    """)
+
+    c.execute("""
+        INSERT INTO transactions
+            (order_id, payment_id, email, plan_id, tier, plan_type, amount_inr, license_key, created_at)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (order_id) DO NOTHING
+    """, (order_id, payment_id, email, plan_id, tier, plan_type, amount_paise / 100, license_key, now))
+
+    conn.commit()
+    conn.close()
+
+
+def get_all_transactions():
+    """Get all payment transactions for admin dashboard."""
+    conn = get_db()
+    c    = conn.cursor()
+    try:
+        c.execute("""
+            SELECT order_id, payment_id, email, tier, plan_type,
+                   amount_inr, license_key, created_at
+            FROM transactions ORDER BY created_at DESC
+        """)
+        rows = c.fetchall()
+        conn.close()
+        return [
+            {
+                "order_id":    r[0],
+                "payment_id":  r[1],
+                "email":       r[2],
+                "tier":        r[3],
+                "plan_type":   r[4],
+                "amount":      f"₹{r[5]:.0f}",
+                "license_key": r[6],
+                "date":        (r[7] or "")[:10]
+            }
+            for r in rows
+        ]
+    except Exception:
+        conn.close()
+        return []
+
+
+def publish_license_to_db(license_key: str, tier: str, plan_type: str):
+    """Save a generated license key to the licenses table."""
+    from datetime import timedelta
+    conn = get_db()
+    c    = conn.cursor()
+    now  = datetime.now().isoformat()
+
+    if plan_type == "monthly":
+        expires_at = (datetime.now() + timedelta(days=30)).isoformat()
+    elif plan_type == "yearly":
+        expires_at = (datetime.now() + timedelta(days=365)).isoformat()
+    else:
+        expires_at = None
+
+    c.execute("""
+        INSERT INTO licenses (license_key, email, tier, plan_type, created_at, expires_at, is_active)
+        VALUES (%s, %s, %s, %s, %s, %s, 1)
+        ON CONFLICT (license_key) DO NOTHING
+    """, (license_key, "purchased@razorpay", tier, plan_type, now, expires_at))
+
+    conn.commit()
+    conn.close()
+    return license_key
+
+
 init_db()
 print("[DB] PostgreSQL initialized ✓")
