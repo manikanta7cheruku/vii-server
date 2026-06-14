@@ -3,6 +3,7 @@ SEVEN-SERVER - main.py
 Privacy-safe analytics + update distribution server for Seven AI
 """
 
+import os
 from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
@@ -480,10 +481,11 @@ import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
-RAZORPAY_KEY_ID     = os.environ.get("RAZORPAY_KEY_ID", "")
-RAZORPAY_KEY_SECRET = os.environ.get("RAZORPAY_KEY_SECRET", "")
-GMAIL_USER          = os.environ.get("GMAIL_USER", "")
-GMAIL_APP_PASSWORD  = os.environ.get("GMAIL_APP_PASSWORD", "")
+import os as _os_payment
+RAZORPAY_KEY_ID     = _os_payment.environ.get("RAZORPAY_KEY_ID", "")
+RAZORPAY_KEY_SECRET = _os_payment.environ.get("RAZORPAY_KEY_SECRET", "")
+GMAIL_USER          = _os_payment.environ.get("GMAIL_USER", "")
+GMAIL_APP_PASSWORD  = _os_payment.environ.get("GMAIL_APP_PASSWORD", "")
 
 # Plan pricing in paise (1 INR = 100 paise)
 PLAN_PRICES = {
