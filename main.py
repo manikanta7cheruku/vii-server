@@ -4,6 +4,8 @@ Privacy-safe analytics + update distribution server for Seven AI
 """
 
 import os
+from dotenv import load_dotenv
+load_dotenv()  # Load .env file before anything else
 from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse

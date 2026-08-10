@@ -12,10 +12,12 @@ import psycopg2.extras
 from datetime import datetime
 
 # ── Database URL from Render environment variable ──
-DATABASE_URL = os.environ.get(
-    "DATABASE_URL",
-    "postgresql://seven_db_or97_user:uXh4jBxZNPt3WWhp61syNfF7hymjXqoX@dpg-d85gniuk1jcs73flj5eg-a/seven_db_or97"
-)
+DATABASE_URL = os.environ.get("DATABASE_URL", "")
+if not DATABASE_URL:
+    raise RuntimeError(
+        "[SEVEN-SERVER] DATABASE_URL not set. "
+        "Create a .env file with your Supabase connection string."
+    )
 
 
 def get_db():
