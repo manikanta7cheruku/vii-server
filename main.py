@@ -490,6 +490,34 @@ def admin_delete_referral(referral_code: str, token: str = Depends(verify_admin_
     return {"success": True, "deleted": deleted}
 
 
+# ── Messages / Push Notifications ──
+
+class SendMessageRequest(BaseModel):
+    title: str
+    body: str
+    target_tier: str = "all"
+    priority: str = "info"
+
+
+@app.post("/admin/messages/send")
+def admin_send_message(req: SendMessageRequest, token: str = Depends(verify_admin_auth)):
+    """Send a push notification to all users."""
+    result = db.create_message(req.title, req.body, req.target_tier, req.priority)
+    return {"success": True, "message_id": result}
+
+
+@app.get("/admin/messages")
+def admin_get_messages(token: str = Depends(verify_admin_auth)):
+    """Get all sent messages."""
+    return db.get_all_messages()
+
+
+@app.get("/api/messages/latest")
+def get_latest_messages(tier: str = "free", since: str = ""):
+    """Called by Seven desktop app to check for new messages. Free, no auth needed."""
+    return db.get_active_messages(tier, since)
+
+
 # =============================================================================
 # REFACTORED ADMIN DASHBOARD WORKSPACE (Tailwind CSS Dark Mode)
 # =============================================================================
