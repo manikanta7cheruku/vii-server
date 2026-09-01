@@ -476,6 +476,20 @@ def admin_purge_ghost_rows(token: str = Depends(verify_admin_auth)):
     return db.clean_ghost_users_real()
 
 
+@app.delete("/admin/users/{device_id}")
+def admin_delete_user(device_id: str, token: str = Depends(verify_admin_auth)):
+    """Permanently delete a user and all their data."""
+    deleted = db.delete_user(device_id)
+    return {"success": True, "deleted": deleted}
+
+
+@app.delete("/admin/referrals/{referral_code}")
+def admin_delete_referral(referral_code: str, token: str = Depends(verify_admin_auth)):
+    """Delete a referral record."""
+    deleted = db.delete_referral(referral_code)
+    return {"success": True, "deleted": deleted}
+
+
 # =============================================================================
 # REFACTORED ADMIN DASHBOARD WORKSPACE (Tailwind CSS Dark Mode)
 # =============================================================================
