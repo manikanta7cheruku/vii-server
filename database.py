@@ -86,6 +86,19 @@ def init_db():
         )
     """)
 
+    # ── Messages / Push Notifications ──
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS messages (
+            id          SERIAL PRIMARY KEY,
+            title       TEXT NOT NULL,
+            body        TEXT NOT NULL,
+            target_tier TEXT DEFAULT 'all',
+            priority    TEXT DEFAULT 'info',
+            is_active   INTEGER DEFAULT 1,
+            created_at  TEXT
+        )
+    """)
+
     # ── Daily Usage ──
     c.execute("""
         CREATE TABLE IF NOT EXISTS daily_usage (
@@ -921,6 +934,64 @@ def publish_license_to_db(license_key: str, tier: str, plan_type: str):
     conn.close()
     return license_key
 
+# ─────────────────────────────────────────────
+# MESSAGES
+# ─────────────────────────────────────────────
+
+def create_message(title, body, target_tier, priority):
+    conn = get_db()
+    c = conn.cursor()
+    now = datetime.now().isoformat()
+    c.execute("""
+        INSERT INTO messages (title, body, target_tier, priority, is_active, created_at)
+        VALUES (%s, %s, %s, %s, 1, %s)
+    """, (title, body, target_tier, priority, now))
+    msg_id = c.fetchone
+    conn.commit()
+    conn.close()
+    return now
+
+
+def get_all_messages():
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("""
+        SELECT id, title, body, target_tier, priority, is_active, created_at
+        FROM messages ORDER BY created_at DESC
+    """)
+    rows = c.fetchall()
+    conn.close()
+    return [
+        {
+            "id": r[0], "title": r[1], "body": r[2],
+            "target_tier": r[3], "priority": r[4],
+            "active": bool(r[5]), "created_at": r[6]
+        }
+        for r in rows
+    ]
+
+
+def get_active_messages(tier, since):
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("""
+        SELECT id, title, body, priority, created_at
+        FROM messages
+        WHERE is_active = 1
+        AND (target_tier = 'all'
+             OR (target_tier = 'pro' AND %s IN ('pro', 'ultimate'))
+             OR (target_tier = 'ultimate' AND %s = 'ultimate')
+             OR (target_tier = 'free' AND %s = 'free'))
+        AND created_at > %s
+        ORDER BY created_at DESC
+        LIMIT 5
+    """, (tier, tier, tier, since or "2000-01-01"))
+    rows = c.fetchall()
+    conn.close()
+    return [
+        {"id": r[0], "title": r[1], "body": r[2], "priority": r[3], "created_at": r[4]}
+        for r in rows
+    ]
 
 init_db()
 print("[DB] PostgreSQL initialized ✓")
