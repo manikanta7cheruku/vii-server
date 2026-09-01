@@ -86,6 +86,17 @@ def init_db():
         )
     """)
 
+    # ── Daily Usage ──
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS daily_usage (
+            id         SERIAL PRIMARY KEY,
+            device_id  TEXT NOT NULL,
+            date       TEXT NOT NULL,
+            hours      REAL DEFAULT 0,
+            UNIQUE(device_id, date)
+        )
+    """)
+
     # ── Updates ──
     c.execute("""
         CREATE TABLE IF NOT EXISTS updates (
@@ -319,19 +330,41 @@ def get_stats():
 def get_all_users():
     conn = get_db()
     c    = conn.cursor()
+
+    # Get today's date for daily usage delta
+    from datetime import date
+    today = date.today().isoformat()
+
     c.execute("""
         SELECT u.device_id, u.name, u.email, u.country,
                u.total_hours, u.license_tier, u.last_seen,
-               COUNT(h.id) as change_count
+               u.install_date,
+               COUNT(h.id) as change_count,
+               COALESCE(d.hours, 0) as today_hours
         FROM users u
         LEFT JOIN user_identity_history h ON h.device_id = u.device_id
+        LEFT JOIN daily_usage d ON d.device_id = u.device_id AND d.date = %s
         GROUP BY u.device_id, u.name, u.email, u.country,
-                 u.total_hours, u.license_tier, u.last_seen
+                 u.total_hours, u.license_tier, u.last_seen, u.install_date, d.hours
         ORDER BY u.last_seen DESC
-    """)
+    """, (today,))
+
     users = []
     for row in c.fetchall():
         total_mins = (row[4] or 0) * 60
+        today_mins = int((row[9] or 0) * 60)
+
+        # Calculate days since joined
+        install_date = row[7]
+        days_joined = None
+        if install_date:
+            try:
+                from datetime import datetime as dt
+                joined = dt.fromisoformat(install_date.split("T")[0])
+                days_joined = (dt.now() - joined).days
+            except Exception:
+                pass
+
         users.append({
             "device_id":    row[0],
             "device_short": (row[0][:12] + "...") if row[0] and len(row[0]) > 12 else row[0],
@@ -340,12 +373,40 @@ def get_all_users():
             "country":      row[3] or "—",
             "total_hours":  round(row[4] or 0, 1),
             "total_time":   _fmt(total_mins),
+            "today_mins":   today_mins,
+            "today_display": f"+{today_mins}m" if today_mins > 0 else "",
             "tier":         row[5] or "free",
             "last_seen":    row[6],
-            "change_count": int(row[7] or 0),
+            "install_date": install_date,
+            "days_joined":  days_joined,
+            "change_count": int(row[8] or 0),
         })
     conn.close()
     return users
+
+
+def delete_user(device_id: str):
+    """Permanently delete a user and all associated data."""
+    conn = get_db()
+    c    = conn.cursor()
+    c.execute("DELETE FROM user_identity_history WHERE device_id = %s", (device_id,))
+    c.execute("DELETE FROM referrals WHERE referred_device_id = %s OR referrer_device_id = %s", (device_id, device_id))
+    c.execute("DELETE FROM users WHERE device_id = %s", (device_id,))
+    deleted = c.rowcount
+    conn.commit()
+    conn.close()
+    return deleted
+
+
+def delete_referral(referral_code: str):
+    """Delete a referral record."""
+    conn = get_db()
+    c    = conn.cursor()
+    c.execute("DELETE FROM referrals WHERE referral_code = %s", (referral_code,))
+    deleted = c.rowcount
+    conn.commit()
+    conn.close()
+    return deleted
 
 
 # ─────────────────────────────────────────────
