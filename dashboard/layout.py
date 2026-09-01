@@ -13,6 +13,8 @@ def render_dashboard() -> str:
     <meta name="theme-color" content="#000000">
     <title>Seven Admin</title>
     <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
     <style>{DASHBOARD_STYLES}</style>
 </head>
 <body class="bg-black text-zinc-100 min-h-screen">
@@ -66,7 +68,16 @@ def render_dashboard() -> str:
                 <button onclick="showTab('referrals')" id="tab-referrals" class="tab-btn">Referrals</button>
                 <button onclick="showTab('transactions')" id="tab-transactions" class="tab-btn">Sales</button>
                 <button onclick="showTab('updates')" id="tab-updates" class="tab-btn">Deploy</button>
+                <button onclick="showTab('messages')" id="tab-messages" class="tab-btn">Messages</button>
             </div>
+        </div>
+
+        <!-- Export Button -->
+        <div class="flex justify-end">
+            <button onclick="exportCurrentTab()" class="px-3 py-1.5 border border-zinc-800 text-[10px] text-zinc-400 hover:text-white rounded-lg font-semibold uppercase tracking-wider transition-colors flex items-center gap-1.5">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>
+                Export PDF / CSV / Word
+            </button>
         </div>
 
         <!-- Content Panel -->
