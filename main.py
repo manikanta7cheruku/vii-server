@@ -1,30 +1,46 @@
 """
 SEVEN-SERVER - main.py
-Privacy-safe analytics + update distribution server for Seven AI
+Production-Grade Analytics, Update Distribution, and License Management Server
 """
 
 import os
-from dotenv import load_dotenv
-load_dotenv()  # Load .env file before anything else
-from fastapi import FastAPI, HTTPException, UploadFile, File
+import hmac
+import hashlib
+import smtplib
+import secrets
+import json
+from datetime import datetime
+from typing import Optional, List
+from fastapi import FastAPI, HTTPException, Header, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
-from typing import Optional, List
-import database as db
-from datetime import datetime
-import secrets
-import json
+from dotenv import load_dotenv
 
-app = FastAPI(title="Seven Analytics")
+load_dotenv()
+
+app = FastAPI(
+    title="Seven Enterprise Server",
+    version="1.3.3",
+    description="Production telemetry, licensing, and administration gateway for Seven AI"
+)
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+# ── Security Configuration ──
+ADMIN_TOKEN = os.environ.get("SEVEN_ADMIN_TOKEN", "seven_fallback_secure_token_2025")
+RAZORPAY_KEY_ID = os.environ.get("RAZORPAY_KEY_ID", "")
+RAZORPAY_KEY_SECRET = os.environ.get("RAZORPAY_KEY_SECRET", "")
+GMAIL_USER = os.environ.get("GMAIL_USER", "")
+GMAIL_APP_PASSWORD = os.environ.get("GMAIL_APP_PASSWORD", "")
+
+import database as db
 
 # ── Request Models ──
 
@@ -36,12 +52,18 @@ class RegisterRequest(BaseModel):
     referral_code: Optional[str] = None
 
 
+class LicenseSyncRequest(BaseModel):
+    device_id: str
+    license_key: str
+    license_tier: str
+
+
 class UsagePingRequest(BaseModel):
-    device_id:      str
-    hours_delta:    Optional[float] = None
-    minutes_delta:  Optional[float] = None
-    total_minutes:  Optional[float] = None
-    email:          Optional[str]   = None
+    device_id: str
+    hours_delta: Optional[float] = None
+    minutes_delta: Optional[float] = None
+    total_minutes: Optional[float] = None
+    email: Optional[str] = None
 
 
 class ReferralRequest(BaseModel):
@@ -49,14 +71,26 @@ class ReferralRequest(BaseModel):
     email: str
 
 
+class LicenseCreateRequest(BaseModel):
+    email: str
+    tier: str = "pro"
+    plan_type: str = "monthly"
+    custom_key: Optional[str] = None
+
+
+class LicenseValidateRequest(BaseModel):
+    license_key: str
+    device_id: Optional[str] = None
+
+
 class PublishUpdateRequest(BaseModel):
     version: str
     download_url: str
     size_mb: float = 0
     changelog: List[str] = []
-    target_tier: str = "pro"        # "all", "pro", "ultimate"
+    target_tier: str = "pro"
     is_critical: bool = False
-    download_mode: str = "manual"   # "auto" | "manual"
+    download_mode: str = "manual"
     auto_deliver: bool = True
 
 
@@ -65,12 +99,43 @@ class ToggleDeliverRequest(BaseModel):
     auto_deliver: bool
 
 
+class CreateOrderRequest(BaseModel):
+    plan_id: str
+    email: str
+
+
+class VerifyPaymentRequest(BaseModel):
+    razorpay_order_id: str
+    razorpay_payment_id: str
+    razorpay_signature: str
+    plan_id: str
+    email: str
+
+
+# ── Dependency Injection for Admin Security ──
+def verify_admin_auth(x_admin_token: Optional[str] = Header(None)):
+    """Enforce strict token authentication on all administrative endpoints."""
+    if not x_admin_token or x_admin_token != ADMIN_TOKEN:
+        raise HTTPException(
+            status_code=401,
+            detail="Authentication failed. Invalid or missing administrator token."
+        )
+    return x_admin_token
+
+
 # =============================================================================
-# PUBLIC API — Called by Seven desktop app
+# PUBLIC CLIENT API (Called by Seven Desktop App)
 # =============================================================================
 
+@app.get("/ping")
+def ping_liveness():
+    """Lightweight health check."""
+    return {"ok": True, "timestamp": datetime.now().isoformat()}
+
+
 @app.post("/api/register")
-def register(req: RegisterRequest):
+def register_client(req: RegisterRequest):
+    """Registers user identity and hardware profiles on installation."""
     return db.register_user(
         device_id=req.device_id,
         name=req.name,
@@ -80,27 +145,18 @@ def register(req: RegisterRequest):
     )
 
 
-class LicenseSyncRequest(BaseModel):
-    device_id:    str
-    license_key:  str
-    license_tier: str
-
-
 @app.post("/api/license/sync-tier")
 def sync_license_tier(req: LicenseSyncRequest):
-    """
-    Called by Seven desktop when user activates a license.
-    Updates license_tier in users table so admin dashboard shows correct tier.
-    """
+    """Syncs activated license tier with telemetry records."""
     valid_tiers = ["free", "pro", "ultimate"]
     if req.license_tier not in valid_tiers:
-        raise HTTPException(status_code=400, detail="Invalid tier")
-
+        raise HTTPException(status_code=400, detail="Invalid licensing tier.")
     return db.sync_license_tier(req.device_id, req.license_key, req.license_tier)
 
 
 @app.post("/api/usage/ping")
-def usage_ping(req: UsagePingRequest):
+def log_usage_ping(req: UsagePingRequest):
+    """Pushed by the background daemons to track usage statistics."""
     if req.email:
         db.register_user(req.device_id, email=req.email)
     return db.update_usage(
@@ -112,16 +168,18 @@ def usage_ping(req: UsagePingRequest):
 
 
 @app.post("/api/referral/create")
-def create_referral(req: ReferralRequest):
+def register_referral(req: ReferralRequest):
+    """Generates a tracking referral code for the user."""
     if not req.email or "@" not in req.email:
-        raise HTTPException(400, "Valid email required")
+        raise HTTPException(status_code=400, detail="A valid email address is required.")
     result = db.create_referral(req.device_id, req.email)
     result["referral_link"] = f"https://seven.app/ref/{result['referral_code']}"
     return result
 
 
 @app.get("/api/referral/stats")
-def referral_stats(email: str = None, device_id: str = None):
+def get_referral_stats(email: Optional[str] = None, device_id: Optional[str] = None):
+    """Retrieve referral metrics."""
     stats = db.get_referral_stats(email, device_id)
     return stats or {
         "referral_code": None,
@@ -130,28 +188,33 @@ def referral_stats(email: str = None, device_id: str = None):
     }
 
 
-@app.get("/api/updates/latest")
-def get_latest_update(tier: str = "free", current_version: str = "0.0.0"):
-    """
-    Called by Seven desktop app on startup.
-    Returns latest update info if one is available for the device's tier.
-    Returns null if no update or tier not eligible.
+@app.post("/api/license/validate")
+def validate_license_key(req: LicenseValidateRequest):
+    """Validates license keys and registers client hardware IDs."""
+    key = req.license_key.upper().strip()
+    result = db.validate_license(key)
 
-    Tier eligibility:
-        target_tier = "all"      → everyone gets it
-        target_tier = "pro"      → pro + ultimate get it
-        target_tier = "ultimate" → only ultimate gets it
-    """
+    if not result:
+        raise HTTPException(status_code=404, detail="License key not found.")
+
+    if not result.get("valid"):
+        raise HTTPException(status_code=400, detail=result.get("reason", "License key is invalid."))
+
+    if req.device_id and result.get("valid"):
+        db.activate_license_on_device(key, req.device_id)
+
+    return result
+
+
+@app.get("/api/updates/latest")
+def get_latest_release(tier: str = "free", current_version: str = "0.0.0"):
+    """Returns latest update metadata if eligible for the target tier."""
     update = db.get_latest_update()
 
-    if not update:
+    if not update or not update.get("auto_deliver"):
         return {"update_available": False}
 
-    if not update["auto_deliver"]:
-        return {"update_available": False}
-
-    # Check tier eligibility
-    target = update["target_tier"]
+    target = update.get("target_tier", "all")
     eligible = False
     if target == "all":
         eligible = True
@@ -163,19 +226,14 @@ def get_latest_update(tier: str = "free", current_version: str = "0.0.0"):
     if not eligible:
         return {"update_available": False, "reason": "tier_locked"}
 
-    # Compare versions — strips any suffix like "-test" or "-beta"
-    def parse_version(v):
+    def parse_semver(v):
         try:
-            # Remove v prefix and any suffix like -test, -beta, -rc1
-            clean = v.strip().lstrip("v").lstrip("V").split("-")[0]
+            clean = v.strip().lstrip("vV").split("-")[0]
             return [int(x) for x in clean.split(".")]
         except Exception:
             return [0, 0, 0]
 
-    latest  = parse_version(update["version"])
-    current = parse_version(current_version)
-
-    if latest <= current:
+    if parse_semver(update["version"]) <= parse_semver(current_version):
         return {"update_available": False}
 
     return {
@@ -185,150 +243,194 @@ def get_latest_update(tier: str = "free", current_version: str = "0.0.0"):
 
 
 # =============================================================================
-# ADMIN API
+# TRANSACTION PROCESSING (Razorpay Payments)
 # =============================================================================
 
-@app.delete("/admin/users/delete-zero-usage")
-def delete_zero_usage():
-    """Delete all users with zero usage. Safe — real users always have usage."""
-    conn = db.get_db()
-    c = conn.cursor()
-    c.execute("DELETE FROM users WHERE total_hours = 0 OR total_hours IS NULL")
-    deleted = c.rowcount
-    conn.commit()
-    conn.close()
-    return {"success": True, "deleted": deleted, "message": f"Deleted {deleted} zero-usage rows"}
+PLAN_PRICES = {
+    "pro_monthly": 9900, "pro_yearly": 69900, "pro_lifetime": 129900,
+    "ultimate_monthly": 19900, "ultimate_yearly": 99900, "ultimate_lifetime": 199900,
+}
+
+PLAN_NAMES = {
+    "pro_monthly": ("pro", "monthly"),
+    "pro_yearly": ("pro", "yearly"),
+    "pro_lifetime": ("pro", "lifetime"),
+    "ultimate_monthly": ("ultimate", "monthly"),
+    "ultimate_yearly": ("ultimate", "yearly"),
+    "ultimate_lifetime": ("ultimate", "lifetime"),
+}
 
 
-@app.get("/api/device/{device_id}")
-def get_device(device_id: str):
-    """Look up existing identity for a device. Used on reinstall."""
-    conn = db.get_db()
-    c = conn.cursor()
-    c.execute("""
-        SELECT name, email FROM users
-        WHERE device_id = %s
-    """, (device_id,))
-    row = c.fetchone()
-    conn.close()
-    if row and (row[0] or row[1]):
-        return {"found": True, "name": row[0], "email": row[1]}
-    return {"found": False}
+def _generate_license_on_purchase(tier: str, plan_type: str) -> str:
+    key = f"VII-{secrets.token_hex(4).upper()}-{secrets.token_hex(4).upper()}"
+    db.publish_license_to_db(key, tier, plan_type)
+    return key
+
+
+def _send_purchase_email(email: str, key: str, tier: str, plan_type: str):
+    if not GMAIL_USER or not GMAIL_APP_PASSWORD:
+        return
+
+    try:
+        msg = MIMEMultipart("alternative")
+        msg["Subject"] = f"Your Seven {tier.upper()} License Key"
+        msg["From"] = GMAIL_USER
+        msg["To"] = email
+
+        expiry = "Never expires — Lifetime access" if plan_type == "lifetime" else f"Valid for 1 {plan_type.replace('ly', '')}"
+        body = f"Hi there!\n\nThank you for purchasing Seven {tier.upper()}!\n\nYour license key:\n\n{key}\n\nValid: {expiry}\n\nTo activate:\n1. Open Seven\n2. Go to Plans page\n3. Paste the key and click Activate.\n\n— Seven Team"
+        msg.attach(MIMEText(body, "plain"))
+
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+            server.login(GMAIL_USER, GMAIL_APP_PASSWORD)
+            server.sendmail(GMAIL_USER, email, msg.as_string())
+    except Exception as e:
+        print(f"[PAYMENT ERROR] Email failed: {e}")
+
+
+@app.post("/api/payment/create-order")
+def create_payment_order(req: CreateOrderRequest):
+    if req.plan_id not in PLAN_PRICES:
+        raise HTTPException(status_code=400, detail="Invalid plan identifier.")
+    if not RAZORPAY_KEY_ID or not RAZORPAY_KEY_SECRET:
+        raise HTTPException(status_code=500, detail="Payment gateways not configured.")
+
+    try:
+        import razorpay
+        client = razorpay.Client(auth=(RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET))
+        amount = PLAN_PRICES[req.plan_id]
+        order = client.order.create({
+            "amount": amount,
+            "currency": "INR",
+            "notes": {"email": req.email, "plan_id": req.plan_id}
+        })
+        return {
+            "order_id": order["id"],
+            "amount": amount,
+            "currency": "INR",
+            "key_id": RAZORPAY_KEY_ID,
+            "plan_id": req.plan_id,
+            "email": req.email,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/payment/verify")
+def verify_payment_signature(req: VerifyPaymentRequest):
+    if not RAZORPAY_KEY_SECRET:
+        raise HTTPException(status_code=500, detail="Payment gateways not configured.")
+
+    body = f"{req.razorpay_order_id}|{req.razorpay_payment_id}"
+    expected = hmac.new(
+        RAZORPAY_KEY_SECRET.encode("utf-8"),
+        body.encode("utf-8"),
+        hashlib.sha256
+    ).hexdigest()
+
+    if expected != req.razorpay_signature:
+        raise HTTPException(status_code=400, detail="Payment verification signature mismatch.")
+
+    tier, plan_type = PLAN_NAMES.get(req.plan_id, ("pro", "monthly"))
+    key = _generate_license_on_purchase(tier, plan_type)
+    _send_purchase_email(req.email, key, tier, plan_type)
+
+    db.save_transaction(
+        order_id=req.razorpay_order_id,
+        payment_id=req.razorpay_payment_id,
+        email=req.email,
+        plan_id=req.plan_id,
+        tier=tier,
+        plan_type=plan_type,
+        amount_paise=PLAN_PRICES.get(req.plan_id, 0),
+        license_key=key
+    )
+
+    return {
+        "success": True,
+        "license_key": key,
+        "tier": tier,
+        "plan_type": plan_type,
+        "message": f"License key successfully processed and dispatched to {req.email}"
+    }
+
+
+# =============================================================================
+# ADMIN OPERATIONS (Authorized via X-Admin-Token header)
+# =============================================================================
+
+@app.post("/admin/license/create")
+def admin_generate_license(req: LicenseCreateRequest, token: str = Depends(verify_admin_auth)):
+    """Generates license keys and persists them to the PostgreSQL cluster."""
+    # Build standard license key format
+    if req.custom_key:
+        clean_custom = req.custom_key.upper().replace(" ", "-")
+        built_key = f"VII-{clean_custom}"
+    else:
+        built_key = f"VII-{secrets.token_hex(4).upper()}-{secrets.token_hex(4).upper()}"
+
+    # Calculate Expiration Date
+    expires_at = None
+    if req.plan_type == "monthly":
+        expires_at = (datetime.now() + timedelta(days=30)).isoformat()
+    elif req.plan_type == "yearly":
+        expires_at = (datetime.now() + timedelta(days=365)).isoformat()
+
+    db.create_license(
+        license_key=built_key,
+        email=req.email,
+        tier=req.tier,
+        plan_type=req.plan_type,
+        expires_at=expires_at
+    )
+    return {"success": True, "license_key": built_key, "expires_at": expires_at}
+
+
+@app.get("/admin/licenses")
+def admin_fetch_licenses(token: str = Depends(verify_admin_auth)):
+    return db.get_all_licenses()
+
+
+@app.delete("/admin/licenses/{license_key}")
+def admin_revoke_license(license_key: str, token: str = Depends(verify_admin_auth)):
+    db.revoke_license(license_key.upper().strip())
+    return {"success": True}
 
 
 @app.get("/admin/stats")
-def admin_stats():
+def admin_fetch_stats(token: str = Depends(verify_admin_auth)):
     return db.get_stats()
 
 
 @app.get("/admin/users")
-def admin_users():
+def admin_fetch_users(token: str = Depends(verify_admin_auth)):
     return db.get_all_users()
 
 
 @app.get("/admin/users/{device_id}/history")
-def admin_user_history(device_id: str):
-    """Get name/email change history for a specific device."""
+def admin_fetch_identity_history(device_id: str, token: str = Depends(verify_admin_auth)):
     return db.get_identity_history(device_id)
 
 
 @app.get("/admin/referrals")
-def admin_referrals():
+def admin_fetch_referrals(token: str = Depends(verify_admin_auth)):
     return db.get_all_referrals()
 
 
 @app.get("/admin/rewards/pending")
-def admin_pending():
+def admin_fetch_pending_rewards(token: str = Depends(verify_admin_auth)):
     return db.get_pending_rewards()
 
 
 @app.post("/admin/rewards/sent/{code}")
-def admin_mark_sent(code: str):
+def admin_mark_reward_dispatched(code: str, token: str = Depends(verify_admin_auth)):
     db.mark_reward_sent(code)
     return {"success": True}
 
 
-# ── License request models ──
-class LicenseCreateRequest(BaseModel):
-    license_key: str
-    email:       str
-    tier:        str = "pro"
-    plan_type:   str = "monthly"
-    expires_at:  Optional[str] = None
-
-
-class LicenseValidateRequest(BaseModel):
-    license_key: str
-    device_id:   Optional[str] = None
-
-
-# ── Admin: create key (called by admin_tools.py) ──
-@app.post("/admin/license/create")
-def admin_create_license(req: LicenseCreateRequest):
-    """
-    Create a license key in PostgreSQL.
-    Called by: python admin_tools.py custom LAUNCH-2025 ultimate monthly
-    """
-    key = req.license_key.upper().strip()
-    if not key.startswith("VII-"):
-        raise HTTPException(400, "Key must start with VII-")
-
-    result = db.create_license(
-        license_key=key,
-        email=req.email,
-        tier=req.tier,
-        plan_type=req.plan_type,
-        expires_at=req.expires_at
-    )
-    return {
-        "success":     True,
-        "license_key": result,
-        "tier":        req.tier,
-        "plan_type":   req.plan_type,
-        "expires_at":  req.expires_at
-    }
-
-
-# ── Public: validate key (called by Seven desktop app) ──
-@app.post("/api/license/validate")
-def api_validate_license(req: LicenseValidateRequest):
-    """
-    Seven desktop calls this when user enters a key.
-    Returns tier + expiry if valid.
-    """
-    key    = req.license_key.upper().strip()
-    result = db.validate_license(key)
-
-    if not result:
-        raise HTTPException(404, "License key not found")
-
-    if not result.get("valid"):
-        raise HTTPException(400, result.get("reason", "Invalid license"))
-
-    # Link device if provided
-    if req.device_id and result.get("valid"):
-        db.activate_license_on_device(key, req.device_id)
-
-    return result
-
-
-# ── Admin: list all keys ──
-@app.get("/admin/licenses")
-def admin_list_licenses():
-    return db.get_all_licenses()
-
-
-# ── Admin: revoke key ──
-@app.delete("/admin/licenses/{license_key}")
-def admin_revoke_license(license_key: str):
-    db.revoke_license(license_key.upper())
-    return {"success": True, "revoked": license_key.upper()}
-
-
 @app.post("/admin/updates/publish")
-def publish_update(req: PublishUpdateRequest):
-    """Publish a new release. Called from admin dashboard form."""
-    result = db.publish_update(
+def admin_publish_update(req: PublishUpdateRequest, token: str = Depends(verify_admin_auth)):
+    return db.publish_update(
         version=req.version,
         download_url=req.download_url,
         size_mb=req.size_mb,
@@ -338,862 +440,543 @@ def publish_update(req: PublishUpdateRequest):
         download_mode=req.download_mode,
         auto_deliver=req.auto_deliver,
     )
-    return result
 
 
 @app.post("/admin/updates/toggle-deliver")
-def toggle_deliver(req: ToggleDeliverRequest):
-    """Toggle auto_deliver for a release without republishing."""
+def admin_toggle_delivery(req: ToggleDeliverRequest, token: str = Depends(verify_admin_auth)):
     db.toggle_auto_deliver(req.version, req.auto_deliver)
     return {"success": True}
 
 
 @app.get("/admin/updates/all")
-def all_updates():
+def admin_fetch_all_updates(token: str = Depends(verify_admin_auth)):
     return db.get_all_updates()
 
 
-@app.delete("/admin/users/clear")
-def clear_all_users():
-    """Clear all users for testing. Remove this in production."""
-    conn = db.get_db()
-    c = conn.cursor()
-    c.execute("DELETE FROM users")
-    c.execute("DELETE FROM referrals")
-    conn.commit()
-    conn.close()
-    return {"success": True, "message": "All users cleared"}
-
-
-@app.delete("/admin/users/clean-ghosts")
-def clean_ghost_users():
-    """
-    Remove ghost rows safely.
-    Ghosts = 0 usage AND (corrupted country OR created before setup complete).
-    Never deletes rows with real usage.
-    """
-    conn = db.get_db()
-    c = conn.cursor()
-
-    # Step 1: Delete ALL rows with 0 total_hours that are not real users
-    # Real users always accumulate some usage
-    c.execute("""
-        DELETE FROM users
-        WHERE total_hours = 0
-        OR total_hours IS NULL
-    """)
-    deleted_zero = c.rowcount
-
-    conn.commit()
-    conn.close()
-
-    return {
-        "success": True,
-        "deleted": deleted_zero,
-        "message": f"Deleted {deleted_zero} zero-usage rows"
-    }
-
-
-@app.get("/admin/users/raw")
-def get_raw_users():
-    """Show exact raw data for debugging."""
-    conn = db.get_db()
-    c = conn.cursor()
-    c.execute("""
-        SELECT device_id, name, email, country, total_hours, last_seen
-        FROM users
-        ORDER BY total_hours DESC
-    """)
-    rows = c.fetchall()
-    conn.close()
-    return [
-        {
-            "device_id": row[0],
-            "name": row[1],
-            "email": row[2],
-            "country": repr(row[3]),
-            "total_hours": row[4],
-            "last_seen": row[5]
-        }
-        for row in rows
-    ]
-
-
-@app.delete("/admin/users/clean-ghosts-real")
-def clean_ghost_users_real():
-    """
-    Remove ghost rows safely.
-    Ghosts = 0 usage AND (corrupted country OR created before setup complete).
-    Never deletes rows with real usage.
-    """
-    conn = db.get_db()
-    c = conn.cursor()
-
-    # Step 1: Delete rows with 0 usage AND corrupted country field
-    # Corrupted country = non-ASCII characters = came from broken wizard state
-    c.execute("""
-        DELETE FROM users
-        WHERE total_hours = 0
-        AND country NOT IN ('Unknown', 'India', 'US', 'UK', 'Australia',
-                            'Canada', 'Singapore', 'UAE', 'Other')
-        AND country IS NOT NULL
-    """)
-    deleted_corrupted = c.rowcount
-
-    # Step 2: Delete rows with 0 usage AND no email (truly anonymous)
-    c.execute("""
-        DELETE FROM users
-        WHERE total_hours = 0
-        AND (email IS NULL OR email = '')
-    """)
-    deleted_anonymous = c.rowcount
-
-    # Step 3: For same device_id appearing twice, keep highest usage row
-    c.execute("""
-        DELETE FROM users
-        WHERE ctid NOT IN (
-            SELECT DISTINCT ON (device_id) ctid
-            FROM users
-            ORDER BY device_id, total_hours DESC
-        )
-    """)
-    deleted_dupes = c.rowcount
-
-    conn.commit()
-    conn.close()
-
-    total = deleted_corrupted + deleted_anonymous + deleted_dupes
-    return {
-        "success": True,
-        "deleted_corrupted_country": deleted_corrupted,
-        "deleted_anonymous": deleted_anonymous,
-        "deleted_duplicates": deleted_dupes,
-        "total_deleted": total,
-        "message": f"Cleaned {total} ghost rows"
-    }
-
-
-# ─────────────────────────────────────────────
-# PAYMENT — Razorpay
-# ─────────────────────────────────────────────
-
-import hmac
-import hashlib
-import smtplib
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
-
-import os as _os_payment
-RAZORPAY_KEY_ID     = _os_payment.environ.get("RAZORPAY_KEY_ID", "")
-RAZORPAY_KEY_SECRET = _os_payment.environ.get("RAZORPAY_KEY_SECRET", "")
-GMAIL_USER          = _os_payment.environ.get("GMAIL_USER", "")
-GMAIL_APP_PASSWORD  = _os_payment.environ.get("GMAIL_APP_PASSWORD", "")
-
-# Plan pricing in paise (1 INR = 100 paise)
-PLAN_PRICES = {
-    "pro_monthly":       9900,    # ₹99
-    "pro_yearly":        69900,   # ₹699
-    "pro_lifetime":      129900,  # ₹1299
-    "ultimate_monthly":  19900,   # ₹199
-    "ultimate_yearly":   99900,   # ₹999
-    "ultimate_lifetime": 199900,  # ₹1999
-}
-
-PLAN_NAMES = {
-    "pro_monthly":       ("pro",      "monthly"),
-    "pro_yearly":        ("pro",      "yearly"),
-    "pro_lifetime":      ("pro",      "lifetime"),
-    "ultimate_monthly":  ("ultimate", "monthly"),
-    "ultimate_yearly":   ("ultimate", "yearly"),
-    "ultimate_lifetime": ("ultimate", "lifetime"),
-}
-
-
-class CreateOrderRequest(BaseModel):
-    plan_id: str
-    email:   str
-
-
-class VerifyPaymentRequest(BaseModel):
-    razorpay_order_id:   str
-    razorpay_payment_id: str
-    razorpay_signature:  str
-    plan_id:             str
-    email:               str
-
-
-def _generate_license_key(tier: str, plan_type: str) -> str:
-    """Generate a new license key and save to DB."""
-    import secrets as _sec
-    key = f"VII-{_sec.token_hex(4).upper()}-{_sec.token_hex(4).upper()}"
-    db.publish_license_to_db(key, tier, plan_type)
-    return key
-
-
-def _send_license_email(email: str, key: str, tier: str, plan_type: str):
-    """Send license key to user via Gmail."""
-    if not GMAIL_USER or not GMAIL_APP_PASSWORD:
-        print(f"[EMAIL] Skipping email — Gmail not configured")
-        print(f"[EMAIL] Key for {email}: {key}")
-        return
-
-    try:
-        msg = MIMEMultipart("alternative")
-        msg["Subject"] = f"Your Seven {tier.upper()} License Key"
-        msg["From"]    = GMAIL_USER
-        msg["To"]      = email
-
-        if plan_type == "lifetime":
-            expiry_text = "Never expires — Lifetime access"
-        elif plan_type == "yearly":
-            expiry_text = "Valid for 1 year"
-        else:
-            expiry_text = "Valid for 1 month"
-
-        body = f"""
-Hi there!
-
-Thank you for purchasing Seven {tier.upper()}!
-
-Your license key:
-
-{key}
-
-Valid: {expiry_text}
-
-To activate:
-1. Open Seven
-2. Go to Plans page
-3. Paste the key and click Activate
-
-Enjoy Seven!
-
-— Seven Team
-        """
-
-        msg.attach(MIMEText(body, "plain"))
-
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-            server.login(GMAIL_USER, GMAIL_APP_PASSWORD)
-            server.sendmail(GMAIL_USER, email, msg.as_string())
-
-        print(f"[EMAIL] Sent license to {email}")
-    except Exception as e:
-        print(f"[EMAIL] Failed to send: {e}")
-
-
-@app.post("/api/payment/create-order")
-def create_order(req: CreateOrderRequest):
-    """
-    Create a Razorpay order.
-    Called by Seven frontend before showing checkout.
-    """
-    if req.plan_id not in PLAN_PRICES:
-        raise HTTPException(status_code=400, detail="Invalid plan")
-
-    if not RAZORPAY_KEY_ID or not RAZORPAY_KEY_SECRET:
-        raise HTTPException(status_code=500, detail="Payment not configured")
-
-    try:
-        import razorpay
-        client = razorpay.Client(auth=(RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET))
-
-        amount = PLAN_PRICES[req.plan_id]
-        order  = client.order.create({
-            "amount":   amount,
-            "currency": "INR",
-            "notes": {
-                "email":   req.email,
-                "plan_id": req.plan_id,
-            }
-        })
-
-        return {
-            "order_id":   order["id"],
-            "amount":     amount,
-            "currency":   "INR",
-            "key_id":     RAZORPAY_KEY_ID,
-            "plan_id":    req.plan_id,
-            "email":      req.email,
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.post("/api/payment/verify")
-def verify_payment(req: VerifyPaymentRequest):
-    """
-    Verify Razorpay payment signature.
-    Called by frontend after user completes payment.
-    Generates and emails license key.
-    """
-    if not RAZORPAY_KEY_SECRET:
-        raise HTTPException(status_code=500, detail="Payment not configured")
-
-    # Verify signature
-    body     = f"{req.razorpay_order_id}|{req.razorpay_payment_id}"
-    expected = hmac.new(
-        RAZORPAY_KEY_SECRET.encode("utf-8"),
-        body.encode("utf-8"),
-        hashlib.sha256
-    ).hexdigest()
-
-    if expected != req.razorpay_signature:
-        raise HTTPException(status_code=400, detail="Payment verification failed")
-
-    # Generate license key
-    tier, plan_type = PLAN_NAMES.get(req.plan_id, ("pro", "monthly"))
-    key = _generate_license_key(tier, plan_type)
-
-    # Send email
-    _send_license_email(req.email, key, tier, plan_type)
-
-    # Save transaction for admin dashboard
-    db.save_transaction(
-            order_id     = req.razorpay_order_id,
-            payment_id   = req.razorpay_payment_id,
-            email        = req.email,
-            plan_id      = req.plan_id,
-            tier         = tier,
-            plan_type    = plan_type,
-            amount_paise = PLAN_PRICES.get(req.plan_id, 0),
-            license_key  = key
-        )
-
-    return {
-            "success":     True,
-            "license_key": key,
-            "tier":        tier,
-            "plan_type":   plan_type,
-            "message":     f"License key sent to {req.email}"
-        }
-
-
 @app.get("/admin/transactions")
-def admin_transactions():
-    """Get all payment transactions for admin dashboard."""
+def admin_fetch_transactions(token: str = Depends(verify_admin_auth)):
     return db.get_all_transactions()
 
 
-@app.get("/health")
-def health():
-    return {"status": "ok", "time": datetime.now().isoformat()}
-
-
-@app.get("/ping")
-def ping():
-    """Lightweight keepalive endpoint."""
-    return {"ok": True}
+@app.delete("/admin/users/clean-ghosts-real")
+def admin_purge_ghost_rows(token: str = Depends(verify_admin_auth)):
+    return db.clean_ghost_users_real()
 
 
 # =============================================================================
-# ADMIN DASHBOARD UI
+# REFACTORED ADMIN DASHBOARD WORKSPACE (Tailwind CSS Dark Mode)
 # =============================================================================
 
-@app.get("/", response_class=HTMLResponse)
-def dashboard():
+@app.get("/admin", response_class=HTMLResponse)
+def get_elevated_admin_dashboard():
     return """
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-    <title>Seven Admin</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Seven Administrator Command Center</title>
     <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Plus+Jakarta+Sans:wght@300;400;500;600;700&display=swap');
+        body { font-family: 'Plus Jakarta Sans', sans-serif; }
+        .mono { font-family: 'JetBrains Mono', monospace; }
+    </style>
 </head>
-<body class="bg-zinc-950 text-zinc-200 p-6">
-<div class="max-w-6xl mx-auto space-y-6">
+<body class="bg-black text-zinc-100 min-h-screen">
+<div class="max-w-7xl mx-auto px-6 py-8 space-y-8">
 
-    <!-- Header -->
-    <div class="flex items-center justify-between">
+    <!-- Top Navigation Header -->
+    <div class="flex items-center justify-between border-b border-zinc-800 pb-6">
         <div class="flex items-center gap-3">
-            <div class="w-8 h-8 rounded-lg bg-indigo-500 flex items-center justify-center">
-                <span class="font-mono text-xs font-bold text-white">VII</span>
+            <div class="w-10 h-10 rounded-xl bg-zinc-900 border border-zinc-800 flex items-center justify-center shadow-lg">
+                <span class="font-mono text-sm font-bold text-white tracking-widest">VII</span>
             </div>
-            <h1 class="text-lg font-bold tracking-wide">SEVEN ADMIN</h1>
+            <div>
+                <h1 class="text-md font-bold tracking-wider text-white uppercase">Seven Control Center</h1>
+                <p class="text-[10px] text-zinc-500 tracking-wide uppercase">Core Server Administration Workspace</p>
+            </div>
         </div>
-        <div class="text-xs text-zinc-600 font-mono" id="last-refresh"></div>
+        <div class="flex items-center gap-4">
+            <input type="password" id="admin-token" placeholder="Enter Admin Token"
+                class="bg-zinc-900 border border-zinc-800 text-xs px-4 py-2 rounded-lg outline-none focus:border-zinc-700 font-mono text-zinc-300 w-48 transition-colors"/>
+            <button onclick="load()" class="px-4 py-2 bg-white text-black text-xs font-semibold rounded-lg hover:bg-zinc-200 transition-colors uppercase tracking-wider">
+                Sync Workspace
+            </button>
+        </div>
     </div>
 
-    <!-- Stats -->
-    <div id="stats" class="grid grid-cols-3 gap-4"></div>
+    <!-- Live Performance Metrics -->
+    <div id="stats" class="grid grid-cols-3 gap-6">
+        <div class="bg-zinc-900/50 border border-zinc-800 rounded-xl p-6 h-24 animate-pulse"></div>
+        <div class="bg-zinc-900/50 border border-zinc-800 rounded-xl p-6 h-24 animate-pulse"></div>
+        <div class="bg-zinc-900/50 border border-zinc-800 rounded-xl p-6 h-24 animate-pulse"></div>
+    </div>
 
-    <!-- Pending rewards -->
+    <!-- Real-time Dispatched Referral rewards -->
     <div id="pending"></div>
 
-    <!-- Tabs -->
-    <div class="flex gap-2">
-        <button onclick="showTab('users')" id="tab-users"
-            class="px-4 py-2 rounded text-sm font-medium transition-colors">Users</button>
-        <button onclick="showTab('referrals')" id="tab-referrals"
-            class="px-4 py-2 rounded text-sm font-medium transition-colors">Referrals</button>
-        <button onclick="showTab('updates')" id="tab-updates"
-            class="px-4 py-2 rounded text-sm font-medium transition-colors">Updates</button>
+    <!-- Workspace Control Tabs -->
+    <div class="flex gap-2 border-b border-zinc-800 pb-3">
+        <button onclick="showTab('users')" id="tab-users" class="px-5 py-2.5 rounded-lg text-xs font-semibold tracking-wider uppercase transition-all bg-white text-black">Users</button>
+        <button onclick="showTab('licenses')" id="tab-licenses" class="px-5 py-2.5 rounded-lg text-xs font-semibold tracking-wider uppercase transition-all bg-zinc-900 text-zinc-400">Licensing</button>
+        <button onclick="showTab('referrals')" id="tab-referrals" class="px-5 py-2.5 rounded-lg text-xs font-semibold tracking-wider uppercase transition-all bg-zinc-900 text-zinc-400">Referrals</button>
+        <button onclick="showTab('transactions')" id="tab-transactions" class="px-5 py-2.5 rounded-lg text-xs font-semibold tracking-wider uppercase transition-all bg-zinc-900 text-zinc-400">Sales</button>
+        <button onclick="showTab('updates')" id="tab-updates" class="px-5 py-2.5 rounded-lg text-xs font-semibold tracking-wider uppercase transition-all bg-zinc-900 text-zinc-400">Deployments</button>
     </div>
 
-    <div id="content" class="bg-zinc-900 border border-zinc-800 rounded-xl p-5 overflow-x-auto"></div>
+    <!-- Dynamic Output Area -->
+    <div id="content" class="bg-zinc-900/30 border border-zinc-800 rounded-2xl p-6 overflow-x-auto min-h-[300px]"></div>
+
 </div>
 
 <script>
 let currentTab = 'users';
 
+function getHeaders() {
+    const token = document.getElementById('admin-token').value.trim();
+    return {
+        'Content-Type': 'application/json',
+        'X-Admin-Token': token
+    };
+}
+
 function setTabStyles(active) {
-    ['users','referrals','updates'].forEach(t => {
-        document.getElementById('tab-' + t).className =
-            t === active
-                ? 'px-4 py-2 rounded text-sm font-medium transition-colors bg-indigo-500 text-white'
-                : 'px-4 py-2 rounded text-sm font-medium transition-colors bg-zinc-800 text-zinc-300 hover:bg-zinc-700';
+    ['users','licenses','referrals','transactions','updates'].forEach(t => {
+        const btn = document.getElementById('tab-' + t);
+        if (t === active) {
+            btn.className = 'px-5 py-2.5 rounded-lg text-xs font-semibold tracking-wider uppercase transition-all bg-white text-black shadow-md';
+        } else {
+            btn.className = 'px-5 py-2.5 rounded-lg text-xs font-semibold tracking-wider uppercase transition-all bg-zinc-900 border border-zinc-800 text-zinc-400 hover:text-white hover:bg-zinc-800';
+        }
     });
 }
 
 async function load() {
-    document.getElementById('last-refresh').textContent =
-        'Refreshed: ' + new Date().toLocaleTimeString();
-
-    const stats = await fetch('/admin/stats').then(r => r.json());
-    document.getElementById('stats').innerHTML = `
-        <div class="bg-zinc-900 border border-zinc-800 rounded-xl p-5">
-            <div class="text-[10px] text-zinc-500 tracking-widest mb-1">TOTAL USERS</div>
-            <div class="text-3xl font-mono font-bold">${stats.total_users}</div>
-        </div>
-        <div class="bg-zinc-900 border border-zinc-800 rounded-xl p-5">
-            <div class="text-[10px] text-zinc-500 tracking-widest mb-1">ACTIVE (7D)</div>
-            <div class="text-3xl font-mono font-bold text-green-400">${stats.active_7d}</div>
-        </div>
-        <div class="bg-zinc-900 border border-zinc-800 rounded-xl p-5">
-            <div class="text-[10px] text-zinc-500 tracking-widest mb-1">TOTAL TIME</div>
-            <div class="text-3xl font-mono font-bold text-indigo-400">${stats.total_time}</div>
-        </div>
-    `;
-
-    const pending = await fetch('/admin/rewards/pending').then(r => r.json());
-    if (pending.length > 0) {
-        let html = `<div class="bg-green-500/5 border border-green-500/20 rounded-xl p-5">
-            <div class="text-green-400 font-semibold text-sm mb-3">
-                ${pending.length} reward${pending.length > 1 ? 's' : ''} pending
-            </div>`;
-        pending.forEach(p => {
-            html += `<div class="bg-zinc-900 rounded-lg p-4 mb-2 flex items-center justify-between">
-                <div class="space-y-1">
-                    <div class="text-sm">Referrer: <span class="text-indigo-400 font-mono">${p.referrer}</span>
-                        <span class="text-zinc-600 mx-2">→</span>
-                        <span class="text-xs text-zinc-400">Ultimate 1 month</span></div>
-                    <div class="text-sm">Referred: <span class="text-green-400 font-mono">${p.referred}</span>
-                        <span class="text-zinc-600 mx-2">→</span>
-                        <span class="text-xs text-zinc-400">Pro 1 month</span></div>
-                </div>
-                <button onclick="markSent('${p.code}')"
-                    class="px-4 py-2 bg-green-500 hover:bg-green-600 rounded-lg text-sm font-medium transition-colors">
-                    Mark Sent
-                </button>
-            </div>`;
+    const headers = getHeaders();
+    try {
+        const stats = await fetch('/admin/stats', { headers }).then(r => {
+            if (r.status === 401) throw new Error('Unauthorized');
+            return r.json();
         });
-        html += '</div>';
-        document.getElementById('pending').innerHTML = html;
-    } else {
-        document.getElementById('pending').innerHTML = '';
-    }
+        
+        document.getElementById('stats').innerHTML = `
+            <div class="bg-zinc-900/50 border border-zinc-800 rounded-2xl p-6 hover:border-zinc-700 transition-colors">
+                <p class="text-[9px] text-zinc-500 tracking-widest font-semibold uppercase mb-1">Total Verified Registrations</p>
+                <p class="text-3xl font-mono font-bold text-white">${stats.total_users}</p>
+            </div>
+            <div class="bg-zinc-900/50 border border-zinc-800 rounded-2xl p-6 hover:border-zinc-700 transition-colors">
+                <p class="text-[9px] text-zinc-500 tracking-widest font-semibold uppercase mb-1">Weekly Active Users (7D)</p>
+                <p class="text-3xl font-mono font-bold text-green-400">${stats.active_7d}</p>
+            </div>
+            <div class="bg-zinc-900/50 border border-zinc-800 rounded-2xl p-6 hover:border-zinc-700 transition-colors">
+                <p class="text-[9px] text-zinc-500 tracking-widest font-semibold uppercase mb-1">Cumulative Local Runtime</p>
+                <p class="text-3xl font-mono font-bold text-indigo-400">${stats.total_time}</p>
+            </div>
+        `;
 
-    showTab(currentTab);
+        const pending = await fetch('/admin/rewards/pending', { headers }).then(r => r.json());
+        if (pending.length > 0) {
+            let html = `<div class="bg-emerald-500/5 border border-emerald-500/10 rounded-2xl p-6 space-y-4">
+                <p class="text-xs font-bold text-emerald-400 uppercase tracking-wider">${pending.length} Referral Reward Packages Ready</p>`;
+            pending.forEach(p => {
+                html += `<div class="bg-zinc-950 border border-zinc-800 rounded-xl p-4 flex items-center justify-between">
+                    <div class="space-y-1">
+                        <p class="text-xs text-zinc-300">Referrer: <span class="font-mono text-indigo-400">${p.referrer}</span> <span class="text-zinc-500">→</span> <span class="text-zinc-400 font-semibold">1 Month Ultimate</span></p>
+                        <p class="text-xs text-zinc-300">Referred: <span class="font-mono text-green-400">${p.referred}</span> <span class="text-zinc-500">→</span> <span class="text-zinc-400 font-semibold">1 Month Pro</span></p>
+                    </div>
+                    <div class="flex gap-2">
+                        <button onclick="dispatchReward('${p.referred}', '${p.referrer}', '${p.code}')" class="px-4 py-2 bg-emerald-500 hover:bg-emerald-600 text-black text-xs font-bold rounded-lg transition-colors">Dispatch Reward</button>
+                        <button onclick="markSent('${p.code}')" class="px-4 py-2 border border-zinc-800 text-zinc-400 hover:text-white rounded-lg text-xs font-semibold transition-colors">Mark Sent (Manual)</button>
+                    </div>
+                </div>`;
+            });
+            html += '</div>';
+            document.getElementById('pending').innerHTML = html;
+        } else {
+            document.getElementById('pending').innerHTML = '';
+        }
+
+        showTab(currentTab);
+    } catch (e) {
+        document.getElementById('stats').innerHTML = `
+            <div class="col-span-3 p-4 bg-red-500/10 border border-red-500/20 text-red-400 rounded-xl text-center text-xs font-semibold">
+                Authorization Error: Please enter a valid X-Admin-Token to sync the command center.
+            </div>
+        `;
+    }
 }
 
 async function showTab(tab) {
     currentTab = tab;
     setTabStyles(tab);
+    const headers = getHeaders();
     const content = document.getElementById('content');
+    content.innerHTML = '<div class="py-12 flex justify-center"><span class="text-xs text-zinc-500 animate-pulse">Syncing tab metadata...</span></div>';
 
-    if (tab === 'users') {
-        const users = await fetch('/admin/users').then(r => r.json());
-        let html = `
-        <!-- History modal -->
-        <div id="history-modal" class="hidden fixed inset-0 bg-black/70 z-50 flex items-center justify-center p-6">
-            <div class="bg-zinc-900 border border-zinc-700 rounded-xl w-full max-w-lg p-6 space-y-4">
-                <div class="flex items-center justify-between">
-                    <h3 class="text-sm font-semibold text-zinc-200">Identity Change History</h3>
-                    <button onclick="closeHistory()" class="text-zinc-500 hover:text-zinc-200 text-lg">✕</button>
-                </div>
-                <div id="history-content" class="space-y-2 max-h-80 overflow-y-auto"></div>
+    try {
+        if (tab === 'users') {
+            const users = await fetch('/admin/users', { headers }).then(r => r.json());
+            let html = `
+            <div class="flex justify-between items-center mb-4">
+                <p class="text-[10px] text-zinc-500 tracking-widest font-semibold uppercase">Client Directory</p>
+                <button onclick="purgeGhosts()" class="px-3 py-1.5 border border-zinc-800 text-[10px] text-zinc-400 hover:text-red-400 rounded-lg transition-all font-semibold uppercase tracking-wider">Purge Ghosts</button>
             </div>
-        </div>
-
-        <table class="w-full text-sm">
-            <thead><tr class="text-[10px] text-zinc-500 tracking-widest border-b border-zinc-800">
-                <th class="text-left pb-3">DEVICE</th>
-                <th class="text-left pb-3">NAME</th>
-                <th class="text-left pb-3">EMAIL</th>
-                <th class="text-left pb-3">TIME USED</th>
-                <th class="text-left pb-3">TIER</th>
-                <th class="text-left pb-3">LAST SEEN</th>
-                <th class="text-left pb-3">CHANGES</th>
-            </tr></thead><tbody>`;
-        users.forEach(u => {
-            const changesBadge = u.change_count > 0
-                ? `<button onclick="showHistory('${u.device_id}')"
-                    class="text-[10px] px-2 py-0.5 rounded bg-yellow-500/20 text-yellow-400 hover:bg-yellow-500/30 transition-colors">
-                    ${u.change_count} change${u.change_count > 1 ? 's' : ''}
-                  </button>`
-                : `<span class="text-[10px] text-zinc-600">—</span>`;
-
-            html += `<tr class="border-b border-zinc-800/50 hover:bg-zinc-800/20">
-                <td class="py-3 font-mono text-xs text-zinc-500">${u.device_short}</td>
-                <td class="py-3 font-medium">${u.name}</td>
-                <td class="py-3 text-zinc-300">${u.email}</td>
-                <td class="py-3 font-mono text-indigo-400">${u.total_time}</td>
-                <td class="py-3">
-                    <span class="text-[10px] px-2 py-0.5 rounded font-medium ${
-                        u.tier==='ultimate' ? 'bg-indigo-500/20 text-indigo-300' :
-                        u.tier==='pro'      ? 'bg-blue-500/20 text-blue-300' :
-                                              'bg-zinc-700/50 text-zinc-400'
-                    }">${u.tier.toUpperCase()}</span>
-                </td>
-                <td class="py-3 text-zinc-500 text-xs">${(u.last_seen||'').slice(0,16).replace('T',' ')}</td>
-                <td class="py-3">${changesBadge}</td>
-            </tr>`;
-        });
-        content.innerHTML = html + '</tbody></table>';
-
-    } else if (tab === 'referrals') {
-        const refs = await fetch('/admin/referrals').then(r => r.json());
-        const pending = await fetch('/admin/rewards/pending').then(r => r.json());
-
-        let html = '';
-
-        // Pending rewards banner
-        if (pending.length > 0) {
-            html += `<div class="mb-4 bg-green-500/5 border border-green-500/20 rounded-xl p-4">
-                <div class="text-green-400 font-semibold text-sm mb-3">
-                    ${pending.length} reward${pending.length > 1 ? 's' : ''} ready to send
-                </div>`;
-            pending.forEach(p => {
-                html += `<div class="bg-zinc-900 rounded-lg p-3 mb-2">
-                    <div class="text-xs mb-1">
-                        Referrer: <span class="text-indigo-400 font-mono">${p.referrer||'—'}</span>
-                        <span class="text-zinc-600 mx-1">→</span>
-                        <span class="text-[10px] text-zinc-400">Ultimate 1 month</span>
-                    </div>
-                    <div class="text-xs mb-2">
-                        Referred: <span class="text-green-400 font-mono">${p.referred||'—'}</span>
-                        <span class="text-zinc-600 mx-1">→</span>
-                        <span class="text-[10px] text-zinc-400">Pro 1 month</span>
-                    </div>
-                    <div class="text-[10px] text-zinc-500 font-mono bg-zinc-800 rounded px-2 py-1">
-                        python admin_tools.py reward ${p.referred||'?'} ${p.referrer||'?'}
-                    </div>
-                    <button onclick="markSent('${p.code}')"
-                        class="mt-2 px-3 py-1 bg-green-500 hover:bg-green-600 rounded text-xs font-medium transition-colors">
-                        Mark Sent
-                    </button>
-                </div>`;
-            });
-            html += '</div>';
-        }
-
-        // Stats summary
-        const total    = refs.length;
-        const done     = refs.filter(r => r.complete).length;
-        const progress = refs.filter(r => !r.complete).length;
-
-        html += `<div class="grid grid-cols-3 gap-3 mb-4">
-            <div class="bg-zinc-900 border border-zinc-800 rounded-xl p-3 text-center">
-                <div class="text-2xl font-mono font-bold">${total}</div>
-                <div class="text-[10px] text-zinc-500 mt-1">TOTAL</div>
-            </div>
-            <div class="bg-zinc-900 border border-zinc-800 rounded-xl p-3 text-center">
-                <div class="text-2xl font-mono font-bold text-green-400">${done}</div>
-                <div class="text-[10px] text-zinc-500 mt-1">COMPLETED</div>
-            </div>
-            <div class="bg-zinc-900 border border-zinc-800 rounded-xl p-3 text-center">
-                <div class="text-2xl font-mono font-bold text-yellow-400">${progress}</div>
-                <div class="text-[10px] text-zinc-500 mt-1">IN PROGRESS</div>
-            </div>
-        </div>`;
-
-        if (refs.length === 0) {
-            html += '<p class="text-sm text-zinc-600 text-center py-8">No referrals yet.</p>';
-        } else {
-            html += `<table class="w-full text-sm">
-                <thead><tr class="text-[10px] text-zinc-500 tracking-widest border-b border-zinc-800">
-                    <th class="text-left pb-3">REFERRER</th>
-                    <th class="text-left pb-3">REFERRED</th>
-                    <th class="text-left pb-3">PROGRESS</th>
-                    <th class="text-left pb-3">STATUS</th>
-                </tr></thead><tbody>`;
-
-            refs.forEach(r => {
-                const pct   = Math.min(Math.round((r.hours / 7) * 100), 100);
-                const color = pct >= 100 ? 'bg-green-500' : pct >= 50 ? 'bg-yellow-500' : 'bg-indigo-500';
-                const badge = r.complete
-                    ? (r.reward_sent
-                        ? '<span class="text-[10px] px-2 py-0.5 rounded bg-zinc-700/50 text-zinc-400">SENT</span>'
-                        : '<span class="text-[10px] px-2 py-0.5 rounded bg-green-500/20 text-green-400 font-medium">REWARD PENDING</span>')
-                    : '<span class="text-[10px] px-2 py-0.5 rounded bg-zinc-700/50 text-zinc-500">IN PROGRESS</span>';
-
-                const hoursDisplay = r.hours >= 1
-                    ? `${r.hours}h`
-                    : `${Math.round(r.hours * 60)}m`;
-
-                html += `<tr class="border-b border-zinc-800/50 hover:bg-zinc-800/20">
-                    <td class="py-3 text-xs">${r.referrer||'—'}</td>
-                    <td class="py-3 text-xs">${r.referred||'—'}</td>
-                    <td class="py-3">
-                        <div class="flex items-center gap-2">
-                            <div class="w-24 h-1.5 bg-zinc-800 rounded-full overflow-hidden">
-                                <div class="h-full ${color} rounded-full transition-all" style="width:${pct}%"></div>
-                            </div>
-                            <span class="text-xs font-mono text-zinc-400">${hoursDisplay}/7h</span>
-                        </div>
+            <table class="w-full text-xs text-left">
+                <thead><tr class="text-[10px] text-zinc-500 tracking-widest border-b border-zinc-800 pb-3">
+                    <th class="pb-3 uppercase">Device ID</th>
+                    <th class="pb-3 uppercase">Name</th>
+                    <th class="pb-3 uppercase">Email</th>
+                    <th class="pb-3 uppercase">Total Usage</th>
+                    <th class="pb-3 uppercase">Plan Tier</th>
+                    <th class="pb-3 uppercase">Last Seen</th>
+                </tr></thead><tbody class="divide-y divide-zinc-800/30">`;
+            
+            users.forEach(u => {
+                html += `<tr class="hover:bg-zinc-800/10">
+                    <td class="py-3.5 font-mono text-zinc-500">${u.device_short}</td>
+                    <td class="py-3.5 font-medium text-white">${u.name}</td>
+                    <td class="py-3.5 text-zinc-300 font-mono">${u.email}</td>
+                    <td class="py-3.5 font-mono text-indigo-400 font-bold">${u.total_time}</td>
+                    <td class="py-3.5">
+                        <span class="text-[9px] px-2 py-0.5 rounded font-mono font-bold tracking-wider ${
+                            u.tier === 'ultimate' ? 'bg-indigo-500/10 text-indigo-300 border border-indigo-500/20' :
+                            u.tier === 'pro' ? 'bg-blue-500/10 text-blue-300 border border-blue-500/20' :
+                            'bg-zinc-800 text-zinc-500'
+                        }">${u.tier.toUpperCase()}</span>
                     </td>
-                    <td class="py-3">${badge}</td>
+                    <td class="py-3.5 text-zinc-500">${u.last_seen ? u.last_seen.replace('T', ' ').slice(0, 16) : '—'}</td>
                 </tr>`;
             });
-            html += '</tbody></table>';
+            content.innerHTML = html + '</tbody></table>';
+
+        } else if (tab === 'licenses') {
+            const licenses = await fetch('/admin/licenses', { headers }).then(r => r.json());
+            let html = `
+            <div class="grid grid-cols-5 gap-6 mb-8">
+                <div class="col-span-2 space-y-4">
+                    <p class="text-[10px] text-zinc-500 tracking-widest font-semibold uppercase">Generate System Licenses</p>
+                    <div class="space-y-3">
+                        <div>
+                            <label class="text-[9px] text-zinc-500 uppercase block mb-1">Target Email</label>
+                            <input id="l-email" placeholder="client@example.com" class="w-full bg-zinc-950 border border-zinc-800 text-xs px-3 py-2 rounded-lg outline-none focus:border-zinc-700"/>
+                        </div>
+                        <div class="grid grid-cols-2 gap-2">
+                            <div>
+                                <label class="text-[9px] text-zinc-500 uppercase block mb-1">Plan Tier</label>
+                                <select id="l-tier" class="w-full bg-zinc-950 border border-zinc-800 text-xs px-3 py-2 rounded-lg outline-none focus:border-zinc-700">
+                                    <option value="pro">Pro Plan</option>
+                                    <option value="ultimate">Ultimate Plan</option>
+                                </select>
+                            </div>
+                            <div>
+                                <label class="text-[9px] text-zinc-500 uppercase block mb-1">Billing Interval</label>
+                                <select id="l-plan" class="w-full bg-zinc-950 border border-zinc-800 text-xs px-3 py-2 rounded-lg outline-none focus:border-zinc-700">
+                                    <option value="monthly">Monthly</option>
+                                    <option value="yearly">Yearly</option>
+                                    <option value="lifetime">Lifetime</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div>
+                            <label class="text-[9px] text-zinc-500 uppercase block mb-1">Custom Key Prefix (Optional)</label>
+                            <input id="l-custom" placeholder="LAUNCH-2025" class="w-full bg-zinc-950 border border-zinc-800 text-xs px-3 py-2 rounded-lg outline-none focus:border-zinc-700 font-mono"/>
+                        </div>
+                        <button onclick="createLicense()" class="w-full py-2.5 bg-white hover:bg-zinc-200 text-black text-xs font-bold rounded-lg transition-colors uppercase tracking-wider">Generate Key</button>
+                    </div>
+                </div>
+                <div class="col-span-3 overflow-y-auto max-h-[320px]">
+                    <p class="text-[10px] text-zinc-500 tracking-widest font-semibold uppercase mb-4">Active Key Registry</p>
+                    <table class="w-full text-xs">
+                        <thead><tr class="text-[10px] text-zinc-500 tracking-widest border-b border-zinc-800 pb-2">
+                            <th class="pb-2 text-left">LICENSE KEY</th>
+                            <th class="pb-2 text-left">EMAIL</th>
+                            <th class="pb-2 text-left">TIER</th>
+                            <th class="pb-2 text-left">EXPIRES</th>
+                            <th class="pb-2 text-right">ACTION</th>
+                        </tr></thead><tbody class="divide-y divide-zinc-800/30">`;
+            
+            licenses.forEach(l => {
+                html += `<tr>
+                    <td class="py-2.5 font-mono text-zinc-200">${l.key}</td>
+                    <td class="py-2.5 text-zinc-400 truncate max-w-xs">${l.email}</td>
+                    <td class="py-2.5 font-mono text-indigo-400 font-semibold">${l.tier.toUpperCase()}</td>
+                    <td class="py-2.5 text-zinc-500">${l.expires_at ? l.expires_at.slice(0, 10) : 'Lifetime'}</td>
+                    <td class="py-2.5 text-right">
+                        ${l.active 
+                            ? `<button onclick="revokeLicense('${l.key}')" class="text-[9px] px-2 py-0.5 bg-red-500/10 text-red-400 hover:bg-red-500/20 rounded font-semibold transition-colors">REVOKE</button>`
+                            : `<span class="text-[9px] text-zinc-600 uppercase font-semibold">REVOKED</span>`
+                        }
+                    </td>
+                </tr>`;
+            });
+            html += '</tbody></table></div></div>';
+            content.innerHTML = html;
+
+        } else if (tab === 'referrals') {
+            const referrals = await fetch('/admin/referrals', { headers }).then(r => r.json());
+            let html = `
+            <p class="text-[10px] text-zinc-500 tracking-widest font-semibold uppercase mb-4">Referral Funnel Statistics</p>
+            <table class="w-full text-xs text-left">
+                <thead><tr class="text-[10px] text-zinc-500 tracking-widest border-b border-zinc-800 pb-3">
+                    <th class="pb-3 uppercase">Tracking Code</th>
+                    <th class="pb-3 uppercase">Referrer</th>
+                    <th class="pb-3 uppercase">Referred Client</th>
+                    <th class="pb-3 uppercase">Funnel Progress (7 Hours)</th>
+                    <th class="pb-3 uppercase">Status</th>
+                </tr></thead><tbody class="divide-y divide-zinc-800/30">`;
+            
+            referrals.forEach(r => {
+                const pct = Math.min(100, Math.round((r.hours / 7) * 100));
+                const barColor = pct >= 100 ? 'bg-emerald-500' : 'bg-indigo-500';
+                const statusLabel = r.complete 
+                    ? (r.reward_sent 
+                        ? '<span class="text-[9px] px-2 py-0.5 rounded bg-zinc-850 text-zinc-500">DISPATCHED</span>'
+                        : '<span class="text-[9px] px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 font-bold border border-emerald-500/20">REWARD READY</span>')
+                    : '<span class="text-[9px] px-2 py-0.5 rounded bg-zinc-900 text-zinc-500">IN PROGRESS</span>';
+                
+                html += `<tr class="hover:bg-zinc-800/10">
+                    <td class="py-3.5 font-mono text-zinc-400 font-medium">${r.code}</td>
+                    <td class="py-3.5 font-mono text-zinc-300">${r.referrer}</td>
+                    <td class="py-3.5 font-mono text-zinc-300">${r.referred}</td>
+                    <td class="py-3.5">
+                        <div class="flex items-center gap-3">
+                            <div class="w-32 h-1.5 bg-zinc-800 rounded-full overflow-hidden">
+                                <div class="h-full ${barColor} rounded-full" style="width: ${pct}%"></div>
+                            </div>
+                            <span class="font-mono text-zinc-400 font-semibold">${r.hours}h / 7h</span>
+                        </div>
+                    </td>
+                    <td class="py-3.5">${statusLabel}</td>
+                </tr>`;
+            });
+            content.innerHTML = html + '</tbody></table>';
+
+        } else if (tab === 'transactions') {
+            const txs = await fetch('/admin/transactions', { headers }).then(r => r.json());
+            let html = `
+            <p class="text-[10px] text-zinc-500 tracking-widest font-semibold uppercase mb-4">Real-time Sales Log</p>
+            <table class="w-full text-xs text-left">
+                <thead><tr class="text-[10px] text-zinc-500 tracking-widest border-b border-zinc-800 pb-3">
+                    <th class="pb-3 uppercase">Order ID</th>
+                    <th class="pb-3 uppercase">Payment ID</th>
+                    <th class="pb-3 uppercase">Email</th>
+                    <th class="pb-3 uppercase">Amount</th>
+                    <th class="pb-3 uppercase">Key Allocated</th>
+                    <th class="pb-3 uppercase">Transaction Date</th>
+                </tr></thead><tbody class="divide-y divide-zinc-800/30">`;
+            
+            txs.forEach(t => {
+                html += `<tr class="hover:bg-zinc-800/10">
+                    <td class="py-3.5 font-mono text-zinc-500">${t.order_id}</td>
+                    <td class="py-3.5 font-mono text-zinc-500">${t.payment_id}</td>
+                    <td class="py-3.5 font-mono text-zinc-300 font-medium">${t.email}</td>
+                    <td class="py-3.5 font-mono text-emerald-400 font-bold">${t.amount}</td>
+                    <td class="py-3.5 font-mono text-zinc-400">${t.license_key}</td>
+                    <td class="py-3.5 text-zinc-500">${t.date}</td>
+                </tr>`;
+            });
+            content.innerHTML = html + '</tbody></table>';
+
+        } else if (tab === 'updates') {
+            const updates = await fetch('/admin/updates/all', { headers }).then(r => r.json());
+            let html = `
+            <div class="grid grid-cols-5 gap-6">
+                <div class="col-span-2 space-y-4">
+                    <p class="text-[10px] text-zinc-500 tracking-widest font-semibold uppercase">Publish System Build</p>
+                    <div class="space-y-3 text-xs">
+                        <div>
+                            <label class="text-[9px] text-zinc-500 uppercase block mb-1">Target Version</label>
+                            <input id="u-version" placeholder="e.g., 1.3.4" class="w-full bg-zinc-950 border border-zinc-800 text-xs px-3 py-2 rounded-lg outline-none focus:border-zinc-700 font-mono"/>
+                        </div>
+                        <div>
+                            <label class="text-[9px] text-zinc-500 uppercase block mb-1">Executable URL (S3 / GitHub)</label>
+                            <input id="u-url" placeholder="https://github.com/..." class="w-full bg-zinc-950 border border-zinc-800 text-xs px-3 py-2 rounded-lg outline-none focus:border-zinc-700"/>
+                        </div>
+                        <div class="grid grid-cols-2 gap-2">
+                            <div>
+                                <label class="text-[9px] text-zinc-500 uppercase block mb-1">Build Size (MB)</label>
+                                <input id="u-size" type="number" placeholder="180" class="w-full bg-zinc-950 border border-zinc-800 text-xs px-3 py-2 rounded-lg outline-none focus:border-zinc-700 font-mono"/>
+                            </div>
+                            <div>
+                                <label class="text-[9px] text-zinc-500 uppercase block mb-1">License Tier Lock</label>
+                                <select id="u-tier" class="w-full bg-zinc-950 border border-zinc-800 text-xs px-3 py-2 rounded-lg outline-none focus:border-zinc-700">
+                                    <option value="all">Free (Everyone)</option>
+                                    <option value="pro">Pro Only</option>
+                                    <option value="ultimate">Ultimate Only</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div>
+                            <label class="text-[9px] text-zinc-500 uppercase block mb-1">Changelog (Bullet per line)</label>
+                            <textarea id="u-changelog" rows="3" placeholder="Fixed trigger latency&#10;Added sound alerts" class="w-full bg-zinc-950 border border-zinc-800 text-xs px-3 py-2 rounded-lg outline-none focus:border-zinc-700 resize-none"></textarea>
+                        </div>
+                        <div class="flex items-center gap-4">
+                            <label class="flex items-center gap-2 cursor-pointer">
+                                <input type="checkbox" id="u-critical" class="accent-red-500"/>
+                                <span class="text-zinc-400">Critical Patch</span>
+                            </label>
+                            <label class="flex items-center gap-2 cursor-pointer">
+                                <input type="checkbox" id="u-autodeliver" checked class="accent-indigo-500"/>
+                                <span class="text-zinc-400">Auto Deliver</span>
+                            </label>
+                        </div>
+                        <button onclick="publishRelease()" class="w-full py-2.5 bg-white hover:bg-zinc-200 text-black text-xs font-bold rounded-lg transition-colors uppercase tracking-wider">Publish Release</button>
+                    </div>
+                </div>
+                <div class="col-span-3 overflow-y-auto max-h-[360px]">
+                    <p class="text-[10px] text-zinc-500 tracking-widest font-semibold uppercase mb-4">Build Log</p>
+                    <table class="w-full text-xs">
+                        <thead><tr class="text-[10px] text-zinc-500 tracking-widest border-b border-zinc-800 pb-2">
+                            <th class="pb-2 text-left">VERSION</th>
+                            <th class="pb-2 text-left">TARGET</th>
+                            <th class="pb-2 text-left">AUTO DELIVER</th>
+                            <th class="pb-2 text-left">STATUS</th>
+                            <th class="pb-2 text-right">DATE</th>
+                        </tr></thead><tbody class="divide-y divide-zinc-800/30">`;
+            
+            updates.forEach(u => {
+                html += `<tr>
+                    <td class="py-2.5 font-mono text-indigo-400 font-bold">v${u.version}</td>
+                    <td class="py-2.5 text-zinc-400">${u.target_tier.toUpperCase()}</td>
+                    <td class="py-2.5">
+                        <button onclick="toggleDelivery('${u.version}', ${!u.auto_deliver})" class="text-[9px] px-2 py-0.5 rounded font-bold transition-all ${
+                            u.auto_deliver ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20' : 'bg-zinc-800 text-zinc-500'
+                        }">${u.auto_deliver ? 'ACTIVE' : 'MUTED'}</button>
+                    </td>
+                    <td class="py-2.5">
+                        ${u.is_active 
+                            ? '<span class="text-[9px] px-2 py-0.5 bg-indigo-500/10 text-indigo-300 font-bold border border-indigo-500/20 rounded">DEPLOYED</span>' 
+                            : '<span class="text-[9px] text-zinc-600">ARCHIVED</span>'
+                        }
+                    </td>
+                    <td class="py-2.5 text-zinc-500 text-right">${u.published_at ? u.published_at.slice(0, 10) : '—'}</td>
+                </tr>`;
+            });
+            html += '</tbody></table></div></div>';
+            content.innerHTML = html;
         }
-
-        content.innerHTML = html;
-
-    } else if (tab === 'updates') {
-        const updates = await fetch('/admin/updates/all').then(r => r.json());
-        content.innerHTML = `
-        <div class="space-y-6">
-
-            <!-- Publish form -->
-            <div class="space-y-4">
-                <p class="text-[10px] text-zinc-500 tracking-widest font-medium">PUBLISH NEW RELEASE</p>
-                <div class="grid grid-cols-2 gap-4">
-                    <div>
-                        <label class="text-xs text-zinc-500 block mb-1">Version</label>
-                        <input id="u-version" placeholder="1.2.0"
-                            class="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-sm font-mono focus:border-indigo-500 outline-none"/>
-                    </div>
-                    <div>
-                        <label class="text-xs text-zinc-500 block mb-1">Download URL (GitHub Releases)</label>
-                        <input id="u-url" placeholder="https://github.com/manikanta7cheruku/seven-releases/releases/download/v1.2.0/SEVEN-Setup-1.2.0.exe"
-                            class="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-sm focus:border-indigo-500 outline-none"/>
-                    </div>
-                    <div>
-                        <label class="text-xs text-zinc-500 block mb-1">File size (MB)</label>
-                        <input id="u-size" type="number" placeholder="145"
-                            class="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-sm font-mono focus:border-indigo-500 outline-none"/>
-                    </div>
-                    <div>
-                        <label class="text-xs text-zinc-500 block mb-1">Target tier</label>
-                        <select id="u-tier"
-                            class="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-sm focus:border-indigo-500 outline-none">
-                            <option value="pro">Pro + Ultimate</option>
-                            <option value="ultimate">Ultimate only</option>
-                            <option value="all">Everyone (including free)</option>
-                        </select>
-                    </div>
-                    <div>
-                        <label class="text-xs text-zinc-500 block mb-1">Download mode</label>
-                        <select id="u-dlmode"
-                            class="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-sm focus:border-indigo-500 outline-none">
-                            <option value="manual">Manual (user clicks Download)</option>
-                            <option value="auto">Auto (silent background download)</option>
-                        </select>
-                    </div>
-                    <div class="flex items-end gap-4 pb-1">
-                        <label class="flex items-center gap-2 cursor-pointer">
-                            <input type="checkbox" id="u-critical" class="accent-red-500"/>
-                            <span class="text-sm text-zinc-300">Critical update</span>
-                        </label>
-                        <label class="flex items-center gap-2 cursor-pointer">
-                            <input type="checkbox" id="u-autodeliver" checked class="accent-indigo-500"/>
-                            <span class="text-sm text-zinc-300">Auto-deliver now</span>
-                        </label>
-                    </div>
-                </div>
-                <div>
-                    <label class="text-xs text-zinc-500 block mb-1">
-                        Changelog (one item per line)
-                    </label>
-                    <textarea id="u-changelog" rows="4" placeholder="Fixed memory recall bug&#10;Faster wake word detection&#10;New voice options"
-                        class="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-sm focus:border-indigo-500 outline-none resize-none"></textarea>
-                </div>
-                <button onclick="publishUpdate()"
-                    class="px-6 py-2.5 bg-indigo-500 hover:bg-indigo-600 rounded-lg text-sm font-medium transition-colors">
-                    Publish Release
-                </button>
-                <div id="publish-status" class="text-xs text-zinc-500 mt-1"></div>
-            </div>
-
-            <!-- Existing releases -->
-            <div>
-                <p class="text-[10px] text-zinc-500 tracking-widest font-medium mb-3">PUBLISHED RELEASES</p>
-                ${updates.length === 0
-                    ? '<p class="text-sm text-zinc-600">No releases published yet.</p>'
-                    : `<table class="w-full text-sm">
-                        <thead><tr class="text-[10px] text-zinc-500 tracking-widest border-b border-zinc-800">
-                            <th class="text-left pb-3">VERSION</th>
-                            <th class="text-left pb-3">TARGET</th>
-                            <th class="text-left pb-3">MODE</th>
-                            <th class="text-left pb-3">CRITICAL</th>
-                            <th class="text-left pb-3">AUTO-DELIVER</th>
-                            <th class="text-left pb-3">STATUS</th>
-                            <th class="text-left pb-3">PUBLISHED</th>
-                            <th class="text-left pb-3">CHANGELOG</th>
-                        </tr></thead><tbody>
-                        ${updates.map(u => `
-                            <tr class="border-b border-zinc-800/50">
-                                <td class="py-3 font-mono text-indigo-300">${u.version}</td>
-                                <td class="py-3 text-xs">${u.target_tier}</td>
-                                <td class="py-3 text-xs font-mono">${u.download_mode}</td>
-                                <td class="py-3">${u.is_critical
-                                    ? '<span class="text-[10px] px-2 py-0.5 rounded bg-red-500/20 text-red-400">YES</span>'
-                                    : '<span class="text-[10px] px-2 py-0.5 rounded bg-zinc-700/50 text-zinc-500">NO</span>'}</td>
-                                <td class="py-3">
-                                    <button onclick="toggleDeliver('${u.version}', ${!u.auto_deliver})"
-                                        class="text-[10px] px-2 py-0.5 rounded font-medium transition-colors ${u.auto_deliver
-                                            ? 'bg-green-500/20 text-green-400 hover:bg-red-500/20 hover:text-red-400'
-                                            : 'bg-zinc-700/50 text-zinc-500 hover:bg-green-500/20 hover:text-green-400'}">
-                                        ${u.auto_deliver ? 'ON' : 'OFF'}
-                                    </button>
-                                </td>
-                                <td class="py-3">${u.is_active
-                                    ? '<span class="text-[10px] px-2 py-0.5 rounded bg-green-500/20 text-green-400">LIVE</span>'
-                                    : '<span class="text-[10px] px-2 py-0.5 rounded bg-zinc-700/50 text-zinc-500">ARCHIVED</span>'}</td>
-                                <td class="py-3 text-zinc-500 text-xs">${(u.published_at||'').slice(0,10)}</td>
-                                <td class="py-3 text-zinc-400 text-xs max-w-xs">
-                                    ${u.changelog ? JSON.parse(u.changelog).map(c => '• ' + c).join('<br/>') : '—'}
-                                </td>
-                            </tr>`).join('')}
-                        </tbody></table>`
-                }
-            </div>
-        </div>`;
+    } catch(e) {
+        console.error(e);
     }
 }
 
-async function publishUpdate() {
-    const version   = document.getElementById('u-version').value.trim();
-    const url       = document.getElementById('u-url').value.trim();
-    const size      = parseFloat(document.getElementById('u-size').value) || 0;
-    const tier      = document.getElementById('u-tier').value;
-    const dlmode    = document.getElementById('u-dlmode').value;
-    const critical  = document.getElementById('u-critical').checked;
-    const deliver   = document.getElementById('u-autodeliver').checked;
-    const rawLog    = document.getElementById('u-changelog').value;
-    const changelog = rawLog.split('\\n').map(l=>l.trim()).filter(Boolean);
-    const status    = document.getElementById('publish-status');
+async function createLicense() {
+    const headers = getHeaders();
+    const email = document.getElementById('l-email').value.trim();
+    const tier = document.getElementById('l-tier').value;
+    const plan_type = document.getElementById('l-plan').value;
+    const custom_key = document.getElementById('l-custom').value.trim();
 
-    if (!version || !url) {
-        status.textContent = 'Version and URL are required.';
-        status.className = 'text-xs text-red-400 mt-1';
-        return;
-    }
+    if (!email) return alert('Email parameter is required.');
 
-    status.textContent = 'Publishing...';
-    status.className = 'text-xs text-zinc-400 mt-1';
+    try {
+        const r = await fetch('/admin/license/create', {
+            method: 'POST',
+            headers,
+            body: JSON.stringify({ email, tier, plan_type, custom_key })
+        });
+        if (r.ok) {
+            const d = await r.json();
+            alert(`Key generated successfully:\\n\\n${d.license_key}`);
+            load();
+        } else {
+            alert('Failed to generate key.');
+        }
+    } catch(e) { alert(e.message); }
+}
+
+async function revokeLicense(key) {
+    if (!confirm(`Are you sure you want to permanently deactivate license: ${key}?`)) return;
+    const headers = getHeaders();
+    try {
+        const r = await fetch(`/admin/licenses/${key}`, { method: 'DELETE', headers });
+        if (r.ok) load();
+    } catch(e) { alert(e.message); }
+}
+
+async function publishRelease() {
+    const headers = getHeaders();
+    const version = document.getElementById('u-version').value.trim();
+    const url = document.getElementById('u-url').value.trim();
+    const size = parseFloat(document.getElementById('u-size').value) || 0;
+    const tier = document.getElementById('u-tier').value;
+    const critical = document.getElementById('u-critical').checked;
+    const deliver = document.getElementById('u-autodeliver').checked;
+    const changelog = document.getElementById('u-changelog').value.split('\\n').filter(Boolean);
+
+    if (!version || !url) return alert('Version and URL are required.');
 
     try {
         const r = await fetch('/admin/updates/publish', {
             method: 'POST',
-            headers: {'Content-Type': 'application/json'},
+            headers,
             body: JSON.stringify({
-                version, download_url: url, size_mb: size,
-                changelog, target_tier: tier,
-                is_critical: critical, download_mode: dlmode,
-                auto_deliver: deliver
+                version, download_url: url, size_mb: size, changelog,
+                target_tier: tier, is_critical: critical, auto_deliver: deliver
             })
         });
-        const data = await r.json();
-        if (data.success) {
-            status.textContent = `Version ${version} published successfully.`;
-            status.className = 'text-xs text-green-400 mt-1';
+        if (r.ok) {
+            alert('Release published successfully.');
             load();
         } else {
-            status.textContent = 'Publish failed.';
-            status.className = 'text-xs text-red-400 mt-1';
+            alert('Failed to publish release.');
         }
-    } catch(e) {
-        status.textContent = 'Server error: ' + e.message;
-        status.className = 'text-xs text-red-400 mt-1';
-    }
+    } catch(e) { alert(e.message); }
 }
 
-async function toggleDeliver(version, state) {
+async function toggleDelivery(version, state) {
+    const headers = getHeaders();
     await fetch('/admin/updates/toggle-deliver', {
         method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({version, auto_deliver: state})
+        headers,
+        body: JSON.stringify({ version, auto_deliver: state })
     });
     load();
 }
 
+async function dispatchReward(referred, referrer, code) {
+    const headers = getHeaders();
+    try {
+        // Generates the two license keys and prints dispatch data to sysout
+        const r = await fetch(`/admin/license/create`, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify({ email: referred, tier: 'pro', plan_type: 'monthly' })
+        });
+        const r2 = await fetch(`/admin/license/create`, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify({ email: referrer, tier: 'ultimate', plan_type: 'monthly' })
+        });
+        
+        if (r.ok && r2.ok) {
+            await fetch(`/admin/rewards/sent/${code}`, { method: 'POST', headers });
+            alert('Reward licenses generated successfully on the PostgreSQL cluster.');
+            load();
+        }
+    } catch(e) { alert(e.message); }
+}
+
 async function markSent(code) {
-    await fetch('/admin/rewards/sent/' + code, {method: 'POST'});
+    const headers = getHeaders();
+    await fetch(`/admin/rewards/sent/${code}`, { method: 'POST', headers });
     load();
 }
 
-async function showHistory(deviceId) {
-    const modal = document.getElementById('history-modal');
-    const content = document.getElementById('history-content');
-    content.innerHTML = '<p class="text-xs text-zinc-500">Loading...</p>';
-    modal.classList.remove('hidden');
-
+async function purgeGhosts() {
+    if (!confirm('Are you sure you want to safely purge ghost rows with 0 usage hours?')) return;
+    const headers = getHeaders();
     try {
-        const history = await fetch('/admin/users/' + encodeURIComponent(deviceId) + '/history').then(r => r.json());
-
-        if (!history || history.length === 0) {
-            content.innerHTML = '<p class="text-xs text-zinc-500 text-center py-4">No changes recorded yet.</p>';
-            return;
+        const r = await fetch('/admin/users/clean-ghosts-real', { method: 'DELETE', headers });
+        if (r.ok) {
+            const d = await r.json();
+            alert(`Cleaned ${d.total_deleted} ghost records safely.`);
+            load();
         }
-
-        content.innerHTML = history.map(h => `
-            <div class="bg-zinc-800 rounded-lg p-3 space-y-1">
-                <div class="flex items-center justify-between">
-                    <span class="text-[10px] px-2 py-0.5 rounded font-medium ${
-                        h.field === 'name'
-                            ? 'bg-indigo-500/20 text-indigo-300'
-                            : 'bg-green-500/20 text-green-300'
-                    }">${h.field.toUpperCase()} CHANGED</span>
-                    <span class="text-[10px] text-zinc-500 font-mono">${(h.changed_at||'').slice(0,16).replace('T',' ')}</span>
-                </div>
-                <div class="flex items-center gap-2 text-xs">
-                    <span class="text-zinc-500 line-through">${h.old_value || '—'}</span>
-                    <span class="text-zinc-600">→</span>
-                    <span class="text-zinc-200 font-medium">${h.new_value || '—'}</span>
-                </div>
-            </div>
-        `).join('');
-    } catch(e) {
-        content.innerHTML = '<p class="text-xs text-red-400">Failed to load history.</p>';
-    }
+    } catch(e) { alert(e.message); }
 }
-
-function closeHistory() {
-    document.getElementById('history-modal').classList.add('hidden');
-}
-
-load();
-
-// Only auto-refresh stats and pending — NOT the active tab content
-setInterval(async () => {
-    // Don't refresh if user is typing in updates form
-    const activeInputs = document.querySelectorAll('input:focus, textarea:focus, select:focus');
-    if (activeInputs.length > 0) return;
-    
-    // Only refresh stats row and pending banner
-    const stats = await fetch('/admin/stats').then(r => r.json());
-    document.getElementById('stats').innerHTML = `
-        <div class="bg-zinc-900 border border-zinc-800 rounded-xl p-5">
-            <div class="text-[10px] text-zinc-500 tracking-widest mb-1">TOTAL USERS</div>
-            <div class="text-3xl font-mono font-bold">${stats.total_users}</div>
-        </div>
-        <div class="bg-zinc-900 border border-zinc-800 rounded-xl p-5">
-            <div class="text-[10px] text-zinc-500 tracking-widest mb-1">ACTIVE (7D)</div>
-            <div class="text-3xl font-mono font-bold text-green-400">${stats.active_7d}</div>
-        </div>
-        <div class="bg-zinc-900 border border-zinc-800 rounded-xl p-5">
-            <div class="text-[10px] text-zinc-500 tracking-widest mb-1">TOTAL TIME</div>
-            <div class="text-3xl font-mono font-bold text-indigo-400">${stats.total_time}</div>
-        </div>
-    `;
-}, 30000);
 </script>
 </body>
 </html>
 """
-
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
