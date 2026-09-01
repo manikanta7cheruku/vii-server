@@ -68,7 +68,7 @@ async function load() {
 }
 
 function setTabStyles(active) {
-    ['users','licenses','referrals','transactions','updates'].forEach(t => {
+    ['users','licenses','referrals','transactions','updates','messages'].forEach(t => {
         const btn = document.getElementById('tab-' + t);
         btn.classList.toggle('active', t === active);
     });
@@ -93,6 +93,8 @@ async function showTab(tab) {
             renderTransactions(await fetch('/admin/transactions', { headers: getHeaders() }).then(r => r.json()));
         } else if (tab === 'updates') {
             renderUpdates(await fetch('/admin/updates/all', { headers: getHeaders() }).then(r => r.json()));
+        } else if (tab === 'messages') {
+            renderMessages();
         }
     } catch(e) { content.innerHTML = '<p class="text-xs text-red-400 text-center py-8">Failed to load.</p>'; }
 }
@@ -409,4 +411,279 @@ async function showHistory(deviceId) {
     } catch(e) { c.innerHTML = '<p class="text-xs text-red-400">Failed.</p>'; }
 }
 function closeHistory() { document.getElementById('history-modal').classList.add('hidden'); }
+
+
+// =============================================================================
+// EXPORT FUNCTIONS (CSV, PDF, Word) — All client-side, no server cost
+// =============================================================================
+
+function exportCSV(data, filename) {
+    if (!data || !data.length) return alert('No data to export');
+    const headers = Object.keys(data[0]);
+    const csvRows = [
+        headers.join(','),
+        ...data.map(row => headers.map(h => {
+            let val = String(row[h] ?? '');
+            if (val.includes(',') || val.includes('"') || val.includes('\\n')) {
+                val = '"' + val.replace(/"/g, '""') + '"';
+            }
+            return val;
+        }).join(','))
+    ];
+    const blob = new Blob([csvRows.join('\\n')], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename + '.csv';
+    a.click();
+    URL.revokeObjectURL(url);
+}
+
+function exportPDF(data, title, filename) {
+    if (!data || !data.length) return alert('No data to export');
+    const { jsPDF } = window.jspdf;
+    const doc = new jsPDF({ orientation: 'landscape', unit: 'mm', format: 'a4' });
+
+    // Title
+    doc.setFontSize(16);
+    doc.setTextColor(30, 30, 30);
+    doc.text(title, 14, 15);
+
+    // Date
+    doc.setFontSize(9);
+    doc.setTextColor(120, 120, 120);
+    doc.text('Generated: ' + new Date().toLocaleString(), 14, 21);
+    doc.text('Total records: ' + data.length, 14, 26);
+
+    // Table
+    const headers = Object.keys(data[0]);
+    const rows = data.map(row => headers.map(h => String(row[h] ?? '').substring(0, 40)));
+
+    doc.autoTable({
+        head: [headers],
+        body: rows,
+        startY: 30,
+        theme: 'grid',
+        headStyles: {
+            fillColor: [20, 20, 20],
+            textColor: [255, 255, 255],
+            fontSize: 7,
+            fontStyle: 'bold',
+            textTransform: 'uppercase'
+        },
+        bodyStyles: {
+            fontSize: 6.5,
+            textColor: [40, 40, 40]
+        },
+        alternateRowStyles: {
+            fillColor: [245, 245, 245]
+        },
+        columnStyles: {
+            0: { cellWidth: 35, fontStyle: 'bold' }
+        },
+        margin: { left: 14, right: 14 },
+        didParseCell: function(data) {
+            if (data.section === 'head') {
+                data.cell.styles.textColor = [255, 255, 255];
+            }
+        }
+    });
+
+    // Footer
+    const pageCount = doc.internal.getNumberOfPages();
+    for (let i = 1; i <= pageCount; i++) {
+        doc.setPage(i);
+        doc.setFontSize(8);
+        doc.setTextColor(150, 150, 150);
+        doc.text(
+            'Seven Admin — Page ' + i + ' of ' + pageCount,
+            14,
+            doc.internal.pageSize.height - 10
+        );
+    }
+
+    doc.save(filename + '.pdf');
+}
+
+function exportWord(data, title, filename) {
+    if (!data || !data.length) return alert('No data to export');
+    const headers = Object.keys(data[0]);
+
+    let html = `<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:w="urn:schemas-microsoft-com:office:word" xmlns="http://www.w3.org/TR/REC-html40">
+    <head><meta charset="utf-8"><title>${title}</title>
+    <style>
+        body { font-family: Calibri, sans-serif; font-size: 11pt; color: #1a1a1a; }
+        h1 { font-size: 18pt; color: #111; margin-bottom: 4px; }
+        .meta { font-size: 9pt; color: #666; margin-bottom: 16px; }
+        table { border-collapse: collapse; width: 100%; margin-top: 12px; }
+        th { background: #1a1a1a; color: white; padding: 6px 8px; font-size: 9pt; text-transform: uppercase; text-align: left; border: 1px solid #333; }
+        td { padding: 5px 8px; font-size: 9pt; border: 1px solid #ddd; }
+        tr:nth-child(even) { background: #f5f5f5; }
+    </style></head><body>
+    <h1>${title}</h1>
+    <p class="meta">Generated: ${new Date().toLocaleString()} | Records: ${data.length}</p>
+    <table><thead><tr>${headers.map(h => '<th>' + h + '</th>').join('')}</tr></thead><tbody>`;
+
+    data.forEach(row => {
+        html += '<tr>' + headers.map(h => '<td>' + String(row[h] ?? '') + '</td>').join('') + '</tr>';
+    });
+
+    html += '</tbody></table></body></html>';
+
+    const blob = new Blob(['\\ufeff', html], { type: 'application/msword' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename + '.doc';
+    a.click();
+    URL.revokeObjectURL(url);
+}
+
+function exportCurrentTab() {
+    const tab = currentTab;
+    const date = new Date().toISOString().slice(0, 10);
+    let data = [];
+    let title = '';
+
+    if (tab === 'users') {
+        data = allUsers.map(u => ({
+            Name: u.name, Email: u.email, Device: u.device_short,
+            Usage: u.total_time, Today: u.today_display,
+            Tier: u.tier, Joined: u.days_joined !== null ? u.days_joined + ' days ago' : '—',
+            'Last Seen': (u.last_seen || '').slice(0, 16).replace('T', ' ')
+        }));
+        title = 'Seven — User Directory';
+    } else if (tab === 'licenses') {
+        const rows = document.querySelectorAll('#content .bg-zinc-950');
+        title = 'Seven — License Registry';
+        data = [];
+        rows.forEach(r => {
+            const text = r.innerText.split('\\n').filter(Boolean);
+            if (text.length >= 2) data.push({ Key: text[0], Details: text[1] });
+        });
+    } else if (tab === 'referrals') {
+        data = allRefs.map(r => ({
+            Code: r.code, Referrer: r.referrer, Referred: r.referred,
+            Hours: r.hours + '/7', Status: r.complete ? (r.reward_sent ? 'Dispatched' : 'Ready') : 'In Progress'
+        }));
+        title = 'Seven — Referral Funnel';
+    } else if (tab === 'transactions') {
+        const rows = document.querySelectorAll('#content .bg-zinc-950');
+        title = 'Seven — Sales Log';
+        data = [];
+        rows.forEach(r => {
+            const text = r.innerText.split('\\n').filter(Boolean);
+            if (text.length >= 2) data.push({ Customer: text[0], Details: text.slice(1).join(' | ') });
+        });
+    } else {
+        return alert('Export is available for Users, Licenses, Referrals, and Sales tabs.');
+    }
+
+    if (!data.length) return alert('No data to export');
+
+    // Show format picker
+    const format = prompt('Export format:\\n1 = PDF (recommended)\\n2 = CSV\\n3 = Word (.doc)\\n\\nEnter 1, 2, or 3:', '1');
+    if (format === '1') exportPDF(data, title, 'seven-' + tab + '-' + date);
+    else if (format === '2') exportCSV(data, 'seven-' + tab + '-' + date);
+    else if (format === '3') exportWord(data, title, 'seven-' + tab + '-' + date);
+    else if (format) alert('Invalid choice');
+}
+
+// =============================================================================
+// MESSAGES / PUSH NOTIFICATIONS (Free, server-stored, client-polled)
+// =============================================================================
+
+async function renderMessages() {
+    const content = document.getElementById('content');
+    content.innerHTML = `
+        <div class="space-y-6">
+            <div class="space-y-4">
+                <p class="text-[10px] text-zinc-500 tracking-widest font-semibold uppercase">Send Message to All Users</p>
+                <p class="text-[11px] text-zinc-400 leading-relaxed">
+                    Messages are stored on the server. When users open Seven, their app checks for new messages
+                    and displays a notification banner. This is completely free — no external service required.
+                </p>
+                <div class="space-y-3">
+                    <div>
+                        <label class="text-[9px] text-zinc-500 uppercase block mb-1">Title</label>
+                        <input id="msg-title" placeholder="e.g., New Update Available" class="w-full bg-zinc-950 border border-zinc-800 px-3 py-2 rounded-lg outline-none focus:border-white/30"/>
+                    </div>
+                    <div>
+                        <label class="text-[9px] text-zinc-500 uppercase block mb-1">Message Body</label>
+                        <textarea id="msg-body" rows="3" placeholder="e.g., Seven 1.4.0 is now available with faster voice recognition and new triggers." class="w-full bg-zinc-950 border border-zinc-800 px-3 py-2 rounded-lg outline-none focus:border-white/30 resize-none"></textarea>
+                    </div>
+                    <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                        <div>
+                            <label class="text-[9px] text-zinc-500 uppercase block mb-1">Target Tier</label>
+                            <select id="msg-tier" class="w-full bg-zinc-950 border border-zinc-800 px-3 py-2 rounded-lg outline-none focus:border-white/30">
+                                <option value="all">All Users</option>
+                                <option value="free">Free Only</option>
+                                <option value="pro">Pro + Ultimate</option>
+                                <option value="ultimate">Ultimate Only</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label class="text-[9px] text-zinc-500 uppercase block mb-1">Priority</label>
+                            <select id="msg-priority" class="w-full bg-zinc-950 border border-zinc-800 px-3 py-2 rounded-lg outline-none focus:border-white/30">
+                                <option value="info">Info (blue banner)</option>
+                                <option value="warning">Warning (yellow banner)</option>
+                                <option value="critical">Critical (red banner)</option>
+                            </select>
+                        </div>
+                    </div>
+                    <button onclick="sendMessage()" class="w-full sm:w-auto px-6 py-2.5 bg-white hover:bg-zinc-200 text-black text-xs font-bold rounded-lg uppercase tracking-wider">Send to All Users</button>
+                </div>
+            </div>
+            <div id="messages-list">
+                <p class="text-[10px] text-zinc-500 tracking-widest font-semibold uppercase mb-3">Sent Messages</p>
+                <p class="text-xs text-zinc-600">Loading...</p>
+            </div>
+        </div>`;
+
+    // Load existing messages
+    try {
+        const msgs = await fetch('/admin/messages', { headers: getHeaders() }).then(r => r.json());
+        const list = document.getElementById('messages-list');
+        if (!msgs || !msgs.length) {
+            list.innerHTML = '<p class="text-[10px] text-zinc-500 tracking-widest font-semibold uppercase mb-3">Sent Messages</p><p class="text-xs text-zinc-600">No messages sent yet.</p>';
+            return;
+        }
+        let html = '<p class="text-[10px] text-zinc-500 tracking-widest font-semibold uppercase mb-3">Sent Messages (' + msgs.length + ')</p><div class="space-y-2">';
+        msgs.forEach(m => {
+            const priorityColor = m.priority === 'critical' ? 'border-red-500/30 bg-red-500/5' : m.priority === 'warning' ? 'border-yellow-500/30 bg-yellow-500/5' : 'border-zinc-800 bg-zinc-950';
+            html += `<div class="border ${priorityColor} rounded-lg p-3">
+                <div class="flex justify-between items-start gap-2 mb-1">
+                    <p class="text-xs font-semibold text-white">${m.title}</p>
+                    <span class="text-[9px] text-zinc-500 mono whitespace-nowrap">${(m.created_at||'').slice(0,16).replace('T',' ')}</span>
+                </div>
+                <p class="text-[11px] text-zinc-400">${m.body}</p>
+                <div class="flex gap-2 mt-2">
+                    <span class="text-[9px] px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-400">${m.target_tier}</span>
+                    <span class="text-[9px] px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-400">${m.priority}</span>
+                    <span class="text-[9px] px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-400">${m.active ? 'Active' : 'Expired'}</span>
+                </div>
+            </div>`;
+        });
+        list.innerHTML = html + '</div>';
+    } catch(e) {
+        document.getElementById('messages-list').innerHTML = '<p class="text-xs text-zinc-600">Could not load messages.</p>';
+    }
+}
+
+async function sendMessage() {
+    const title = document.getElementById('msg-title').value.trim();
+    const body = document.getElementById('msg-body').value.trim();
+    const tier = document.getElementById('msg-tier').value;
+    const priority = document.getElementById('msg-priority').value;
+    if (!title || !body) return alert('Title and body are required');
+    try {
+        const r = await fetch('/admin/messages/send', {
+            method: 'POST',
+            headers: getHeaders(),
+            body: JSON.stringify({ title, body, target_tier: tier, priority })
+        });
+        if (r.ok) { alert('Message sent'); renderMessages(); }
+        else alert('Failed to send');
+    } catch(e) { alert(e.message); }
+}
 """
