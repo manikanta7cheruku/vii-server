@@ -1,0 +1,1 @@
+"""SEVEN Admin Dashboard — modular HTML components."""
