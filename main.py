@@ -127,10 +127,23 @@ def verify_admin_auth(x_admin_token: Optional[str] = Header(None)):
 # PUBLIC CLIENT API (Called by Seven Desktop App)
 # =============================================================================
 
+@app.get("/")
+def root_redirect():
+    """Root endpoint — redirects to admin dashboard."""
+    from fastapi.responses import RedirectResponse
+    return RedirectResponse(url="/admin")
+
+
 @app.get("/ping")
 def ping_liveness():
-    """Lightweight health check."""
+    """Lightweight health check for Render keepalive."""
     return {"ok": True, "timestamp": datetime.now().isoformat()}
+
+
+@app.get("/health")
+def health_check():
+    """Health check endpoint."""
+    return {"status": "ok", "time": datetime.now().isoformat()}
 
 
 @app.post("/api/register")
