@@ -95,9 +95,16 @@ def init_db():
             target_tier TEXT DEFAULT 'all',
             priority    TEXT DEFAULT 'info',
             is_active   INTEGER DEFAULT 1,
-            created_at  TEXT
+            created_at  TEXT,
+            expires_at  TEXT
         )
     """)
+    # Add expires_at column if table already exists without it
+    try:
+        c.execute("ALTER TABLE messages ADD COLUMN expires_at TEXT")
+        conn.commit()
+    except Exception:
+        conn.rollback()
 
     # ── Daily Usage ──
     c.execute("""
@@ -938,25 +945,36 @@ def publish_license_to_db(license_key: str, tier: str, plan_type: str):
 # MESSAGES
 # ─────────────────────────────────────────────
 
-def create_message(title, body, target_tier, priority):
+def create_message(title, body, target_tier, priority, duration_hours=48):
+    """Create a message with auto-expiry. Default duration: 48 hours (2 days)."""
+    from datetime import timedelta
     conn = get_db()
     c = conn.cursor()
-    now = datetime.now().isoformat()
+    now = datetime.now()
+    expires_at = now + timedelta(hours=duration_hours)
     c.execute("""
-        INSERT INTO messages (title, body, target_tier, priority, is_active, created_at)
-        VALUES (%s, %s, %s, %s, 1, %s)
-    """, (title, body, target_tier, priority, now))
-    msg_id = c.fetchone
+        INSERT INTO messages (title, body, target_tier, priority, is_active, created_at, expires_at)
+        VALUES (%s, %s, %s, %s, 1, %s, %s)
+        RETURNING id
+    """, (title, body, target_tier, priority, now.isoformat(), expires_at.isoformat()))
+    row = c.fetchone()
+    msg_id = row[0] if row else None
     conn.commit()
     conn.close()
-    return now
+    return msg_id
 
 
 def get_all_messages():
     conn = get_db()
     c = conn.cursor()
+    # Auto-deactivate expired messages
     c.execute("""
-        SELECT id, title, body, target_tier, priority, is_active, created_at
+        UPDATE messages SET is_active = 0
+        WHERE is_active = 1 AND expires_at IS NOT NULL AND expires_at < %s
+    """, (datetime.now().isoformat(),))
+    conn.commit()
+    c.execute("""
+        SELECT id, title, body, target_tier, priority, is_active, created_at, expires_at
         FROM messages ORDER BY created_at DESC
     """)
     rows = c.fetchall()
@@ -965,7 +983,8 @@ def get_all_messages():
         {
             "id": r[0], "title": r[1], "body": r[2],
             "target_tier": r[3], "priority": r[4],
-            "active": bool(r[5]), "created_at": r[6]
+            "active": bool(r[5]), "created_at": r[6],
+            "expires_at": r[7]
         }
         for r in rows
     ]
@@ -974,10 +993,12 @@ def get_all_messages():
 def get_active_messages(tier, since):
     conn = get_db()
     c = conn.cursor()
+    now = datetime.now().isoformat()
     c.execute("""
         SELECT id, title, body, priority, created_at
         FROM messages
         WHERE is_active = 1
+        AND (expires_at IS NULL OR expires_at > %s)
         AND (target_tier = 'all'
              OR (target_tier = 'pro' AND %s IN ('pro', 'ultimate'))
              OR (target_tier = 'ultimate' AND %s = 'ultimate')
@@ -985,13 +1006,42 @@ def get_active_messages(tier, since):
         AND created_at > %s
         ORDER BY created_at DESC
         LIMIT 5
-    """, (tier, tier, tier, since or "2000-01-01"))
+    """, (now, tier, tier, tier, since or "2000-01-01"))
     rows = c.fetchall()
     conn.close()
     return [
         {"id": r[0], "title": r[1], "body": r[2], "priority": r[3], "created_at": r[4]}
         for r in rows
     ]
+
+
+def update_message(msg_id, title, body, target_tier, priority, duration_hours):
+    """Edit an existing message."""
+    from datetime import timedelta
+    conn = get_db()
+    c = conn.cursor()
+    now = datetime.now()
+    expires_at = now + timedelta(hours=duration_hours)
+    c.execute("""
+        UPDATE messages
+        SET title = %s, body = %s, target_tier = %s, priority = %s,
+            is_active = 1, expires_at = %s
+        WHERE id = %s
+    """, (title, body, target_tier, priority, expires_at.isoformat(), msg_id))
+    conn.commit()
+    conn.close()
+    return msg_id
+
+
+def delete_message(msg_id):
+    """Permanently delete a message."""
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("DELETE FROM messages WHERE id = %s", (msg_id,))
+    deleted = c.rowcount
+    conn.commit()
+    conn.close()
+    return deleted
 
 init_db()
 print("[DB] PostgreSQL initialized ✓")
