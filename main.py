@@ -497,12 +497,23 @@ class SendMessageRequest(BaseModel):
     body: str
     target_tier: str = "all"
     priority: str = "info"
+    duration_hours: int = 48  # Default 2 days
+
+
+class EditMessageRequest(BaseModel):
+    title: str
+    body: str
+    target_tier: str = "all"
+    priority: str = "info"
+    duration_hours: int = 48
 
 
 @app.post("/admin/messages/send")
 def admin_send_message(req: SendMessageRequest, token: str = Depends(verify_admin_auth)):
-    """Send a push notification to all users."""
-    result = db.create_message(req.title, req.body, req.target_tier, req.priority)
+    """Send a push notification to all users with auto-expiry."""
+    result = db.create_message(
+        req.title, req.body, req.target_tier, req.priority, req.duration_hours
+    )
     return {"success": True, "message_id": result}
 
 
@@ -510,6 +521,22 @@ def admin_send_message(req: SendMessageRequest, token: str = Depends(verify_admi
 def admin_get_messages(token: str = Depends(verify_admin_auth)):
     """Get all sent messages."""
     return db.get_all_messages()
+
+
+@app.put("/admin/messages/{msg_id}")
+def admin_edit_message(msg_id: int, req: EditMessageRequest, token: str = Depends(verify_admin_auth)):
+    """Edit an existing message and reset its expiry."""
+    result = db.update_message(
+        msg_id, req.title, req.body, req.target_tier, req.priority, req.duration_hours
+    )
+    return {"success": True, "message_id": result}
+
+
+@app.delete("/admin/messages/{msg_id}")
+def admin_delete_message(msg_id: int, token: str = Depends(verify_admin_auth)):
+    """Permanently delete a message."""
+    deleted = db.delete_message(msg_id)
+    return {"success": True, "deleted": deleted}
 
 
 @app.get("/api/messages/latest")
