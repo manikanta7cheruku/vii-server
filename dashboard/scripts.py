@@ -593,15 +593,16 @@ function exportCurrentTab() {
 // MESSAGES / PUSH NOTIFICATIONS (Free, server-stored, client-polled)
 // =============================================================================
 
+let editingMsgId = null;
+
 async function renderMessages() {
     const content = document.getElementById('content');
     content.innerHTML = `
         <div class="space-y-6">
             <div class="space-y-4">
-                <p class="text-[10px] text-zinc-500 tracking-widest font-semibold uppercase">Send Message to All Users</p>
+                <p class="text-[10px] text-zinc-500 tracking-widest font-semibold uppercase" id="msg-form-title">Send Message to All Users</p>
                 <p class="text-[11px] text-zinc-400 leading-relaxed">
-                    Messages are stored on the server. When users open Seven, their app checks for new messages
-                    and displays a notification banner. This is completely free — no external service required.
+                    Messages appear as banners inside the Seven app. They auto-expire after the duration you set. Completely free.
                 </p>
                 <div class="space-y-3">
                     <div>
@@ -610,9 +611,9 @@ async function renderMessages() {
                     </div>
                     <div>
                         <label class="text-[9px] text-zinc-500 uppercase block mb-1">Message Body</label>
-                        <textarea id="msg-body" rows="3" placeholder="e.g., Seven 1.4.0 is now available with faster voice recognition and new triggers." class="w-full bg-zinc-950 border border-zinc-800 px-3 py-2 rounded-lg outline-none focus:border-white/30 resize-none"></textarea>
+                        <textarea id="msg-body" rows="3" placeholder="e.g., Seven 1.4.0 is now available." class="w-full bg-zinc-950 border border-zinc-800 px-3 py-2 rounded-lg outline-none focus:border-white/30 resize-none"></textarea>
                     </div>
-                    <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
                         <div>
                             <label class="text-[9px] text-zinc-500 uppercase block mb-1">Target Tier</label>
                             <select id="msg-tier" class="w-full bg-zinc-950 border border-zinc-800 px-3 py-2 rounded-lg outline-none focus:border-white/30">
@@ -625,22 +626,35 @@ async function renderMessages() {
                         <div>
                             <label class="text-[9px] text-zinc-500 uppercase block mb-1">Priority</label>
                             <select id="msg-priority" class="w-full bg-zinc-950 border border-zinc-800 px-3 py-2 rounded-lg outline-none focus:border-white/30">
-                                <option value="info">Info (blue banner)</option>
-                                <option value="warning">Warning (yellow banner)</option>
-                                <option value="critical">Critical (red banner)</option>
+                                <option value="info">Info (blue)</option>
+                                <option value="warning">Warning (yellow)</option>
+                                <option value="critical">Critical (red)</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label class="text-[9px] text-zinc-500 uppercase block mb-1">Duration</label>
+                            <select id="msg-duration" class="w-full bg-zinc-950 border border-zinc-800 px-3 py-2 rounded-lg outline-none focus:border-white/30">
+                                <option value="6">6 Hours</option>
+                                <option value="12">12 Hours</option>
+                                <option value="24">1 Day</option>
+                                <option value="48" selected>2 Days</option>
+                                <option value="72">3 Days</option>
+                                <option value="168">1 Week</option>
+                                <option value="720">1 Month</option>
                             </select>
                         </div>
                     </div>
-                    <button onclick="sendMessage()" class="w-full sm:w-auto px-6 py-2.5 bg-white hover:bg-zinc-200 text-black text-xs font-bold rounded-lg uppercase tracking-wider">Send to All Users</button>
+                    <div class="flex gap-2">
+                        <button onclick="sendMessage()" id="msg-send-btn" class="px-6 py-2.5 bg-white hover:bg-zinc-200 text-black text-xs font-bold rounded-lg uppercase tracking-wider">Send Message</button>
+                        <button onclick="cancelEdit()" id="msg-cancel-btn" class="hidden px-4 py-2.5 border border-zinc-800 text-zinc-400 text-xs rounded-lg">Cancel Edit</button>
+                    </div>
                 </div>
             </div>
             <div id="messages-list">
-                <p class="text-[10px] text-zinc-500 tracking-widest font-semibold uppercase mb-3">Sent Messages</p>
                 <p class="text-xs text-zinc-600">Loading...</p>
             </div>
         </div>`;
 
-    // Load existing messages
     try {
         const msgs = await fetch('/admin/messages', { headers: getHeaders() }).then(r => r.json());
         const list = document.getElementById('messages-list');
@@ -650,23 +664,29 @@ async function renderMessages() {
         }
         let html = '<p class="text-[10px] text-zinc-500 tracking-widest font-semibold uppercase mb-3">Sent Messages (' + msgs.length + ')</p><div class="space-y-2">';
         msgs.forEach(m => {
-            const priorityColor = m.priority === 'critical' ? 'border-red-500/30 bg-red-500/5' : m.priority === 'warning' ? 'border-yellow-500/30 bg-yellow-500/5' : 'border-zinc-800 bg-zinc-950';
-            html += `<div class="border ${priorityColor} rounded-lg p-3">
+            const pc = m.priority === 'critical' ? 'border-red-500/30 bg-red-500/5' : m.priority === 'warning' ? 'border-yellow-500/30 bg-yellow-500/5' : 'border-zinc-800 bg-zinc-950';
+            const expiresStr = m.expires_at ? 'Expires ' + m.expires_at.slice(0, 16).replace('T', ' ') : 'No expiry';
+            html += `<div class="border ${pc} rounded-lg p-3 fade-in">
                 <div class="flex justify-between items-start gap-2 mb-1">
                     <p class="text-xs font-semibold text-white">${m.title}</p>
                     <span class="text-[9px] text-zinc-500 mono whitespace-nowrap">${(m.created_at||'').slice(0,16).replace('T',' ')}</span>
                 </div>
-                <p class="text-[11px] text-zinc-400">${m.body}</p>
-                <div class="flex gap-2 mt-2">
+                <p class="text-[11px] text-zinc-400 mb-2">${m.body}</p>
+                <div class="flex flex-wrap items-center gap-2">
                     <span class="text-[9px] px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-400">${m.target_tier}</span>
                     <span class="text-[9px] px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-400">${m.priority}</span>
-                    <span class="text-[9px] px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-400">${m.active ? 'Active' : 'Expired'}</span>
+                    <span class="text-[9px] px-1.5 py-0.5 rounded ${m.active ? 'bg-emerald-500/10 text-emerald-400' : 'bg-red-500/10 text-red-400'}">${m.active ? 'Active' : 'Expired'}</span>
+                    <span class="text-[9px] text-zinc-600 mono">${expiresStr}</span>
+                    <div class="flex gap-1 ml-auto">
+                        <button onclick="editMessage(${m.id},'${m.title.replace(/'/g,"\\'")}','${m.body.replace(/'/g,"\\'")}','${m.target_tier}','${m.priority}')" class="text-[9px] px-2 py-0.5 rounded bg-indigo-500/10 text-indigo-400 hover:bg-indigo-500/20">Edit</button>
+                        <button onclick="deleteMessage(${m.id})" class="text-[9px] px-2 py-0.5 rounded bg-red-500/10 text-red-400 hover:bg-red-500/20">Delete</button>
+                    </div>
                 </div>
             </div>`;
         });
         list.innerHTML = html + '</div>';
     } catch(e) {
-        document.getElementById('messages-list').innerHTML = '<p class="text-xs text-zinc-600">Could not load messages.</p>';
+        document.getElementById('messages-list').innerHTML = '<p class="text-xs text-red-400">Could not load messages. Check your token.</p>';
     }
 }
 
@@ -675,15 +695,57 @@ async function sendMessage() {
     const body = document.getElementById('msg-body').value.trim();
     const tier = document.getElementById('msg-tier').value;
     const priority = document.getElementById('msg-priority').value;
+    const duration = parseInt(document.getElementById('msg-duration').value);
     if (!title || !body) return alert('Title and body are required');
+
     try {
-        const r = await fetch('/admin/messages/send', {
-            method: 'POST',
-            headers: getHeaders(),
-            body: JSON.stringify({ title, body, target_tier: tier, priority })
-        });
-        if (r.ok) { alert('Message sent'); renderMessages(); }
-        else alert('Failed to send');
+        let r;
+        if (editingMsgId) {
+            r = await fetch('/admin/messages/' + editingMsgId, {
+                method: 'PUT',
+                headers: getHeaders(),
+                body: JSON.stringify({ title, body, target_tier: tier, priority, duration_hours: duration })
+            });
+        } else {
+            r = await fetch('/admin/messages/send', {
+                method: 'POST',
+                headers: getHeaders(),
+                body: JSON.stringify({ title, body, target_tier: tier, priority, duration_hours: duration })
+            });
+        }
+        if (r.ok) {
+            cancelEdit();
+            renderMessages();
+        } else alert('Failed');
+    } catch(e) { alert(e.message); }
+}
+
+function editMessage(id, title, body, tier, priority) {
+    editingMsgId = id;
+    document.getElementById('msg-title').value = title;
+    document.getElementById('msg-body').value = body;
+    document.getElementById('msg-tier').value = tier;
+    document.getElementById('msg-priority').value = priority;
+    document.getElementById('msg-form-title').textContent = 'Editing Message #' + id;
+    document.getElementById('msg-send-btn').textContent = 'Save Changes';
+    document.getElementById('msg-cancel-btn').classList.remove('hidden');
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
+function cancelEdit() {
+    editingMsgId = null;
+    document.getElementById('msg-title').value = '';
+    document.getElementById('msg-body').value = '';
+    document.getElementById('msg-form-title').textContent = 'Send Message to All Users';
+    document.getElementById('msg-send-btn').textContent = 'Send Message';
+    document.getElementById('msg-cancel-btn').classList.add('hidden');
+}
+
+async function deleteMessage(id) {
+    if (!confirm('Delete this message permanently?')) return;
+    try {
+        await fetch('/admin/messages/' + id, { method: 'DELETE', headers: getHeaders() });
+        renderMessages();
     } catch(e) { alert(e.message); }
 }
 """
